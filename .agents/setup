@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$repo_root"
+
+if [[ "$(uname -s)" != Linux ]]; then
+  echo 'Amp orb setup supports Linux. See CONTRIBUTING.md for local development.' >&2
+  exit 1
+fi
+
+started=$SECONDS
+echo '==> Checking system dependencies'
+packages=()
+for command_package in make:make gcc:build-essential shellcheck:shellcheck curl:curl xz:xz-utils; do
+  command="${command_package%%:*}"
+  if ! command -v "$command" >/dev/null 2>&1; then
+    packages+=("${command_package#*:}")
+  fi
+done
+if ! command -v docker >/dev/null 2>&1 || ! command -v dockerd >/dev/null 2>&1; then
+  packages+=(docker.io)
+fi
+if ((${#packages[@]})); then
+  sudo apt-get update
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo 'uv is required (included in Amp orbs). Install it before running setup.' >&2
+  exit 1
+fi
+
+# Match the Python/Node lines used by CI and the documented Go 1.24.x toolchain.
+# Verify toolchain downloads before extracting them; do not execute remote installers.
+node_version=24.22.2
+go_version=1.24.13
+case "$(uname -m)" in
+  x86_64)
+    node_arch=x64
+    go_arch=amd64
+    node_sha=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
+    go_sha=1fc94b57134d51669c72173ad5d49fd62afb0f1db9bf3f798fd98ee423f8d730
+    ;;
+  aarch64|arm64)
+    node_arch=arm64
+    go_arch=arm64
+    node_sha=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8
+    go_sha=74d97be1cc3a474129590c67ebf748a96e72d9f3a2b6fef3ed3275de591d49b3
+    ;;
+  *) echo 'Unsupported orb CPU architecture.' >&2; exit 1 ;;
+esac
+
+download_dir="$(mktemp -d)"
+trap 'rm -rf -- "$download_dir"' EXIT
+
+echo "==> Preparing Node $node_version and Go $go_version (${SECONDS}s)"
+node_home="/usr/local/lib/strix-node-$node_version"
+if [[ ! -x "$node_home/bin/node" ]]; then
+  curl -fsSL --retry 3 "https://nodejs.org/dist/v$node_version/node-v$node_version-linux-$node_arch.tar.xz" -o "$download_dir/node.tar.xz"
+  echo "$node_sha  $download_dir/node.tar.xz" | sha256sum --check --status
+  sudo mkdir -p "$node_home"
+  sudo tar -xJf "$download_dir/node.tar.xz" -C "$node_home" --strip-components=1
+fi
+for binary in node npm npx; do
+  sudo ln -sfn "$node_home/bin/$binary" "/usr/local/bin/$binary"
+done
+
+go_home="/usr/local/lib/strix-go-$go_version"
+if [[ ! -x "$go_home/bin/go" ]]; then
+  curl -fsSL --retry 3 "https://go.dev/dl/go$go_version.linux-$go_arch.tar.gz" -o "$download_dir/go.tar.gz"
+  echo "$go_sha  $download_dir/go.tar.gz" | sha256sum --check --status
+  sudo mkdir -p "$go_home"
+  sudo tar -xzf "$download_dir/go.tar.gz" -C "$go_home" --strip-components=1
+fi
+for binary in go gofmt; do
+  sudo ln -sfn "$go_home/bin/$binary" "/usr/local/bin/$binary"
+done
+
+echo "==> Installing locked Python dependencies (${SECONDS}s)"
+uv python install 3.12
+uv sync --locked --python 3.12
+
+echo "==> Installing locked viewer dependencies (${SECONDS}s)"
+# npm ci always deletes node_modules, even in a warm project snapshot. Record
+# successful installs inside node_modules so deleting it also invalidates the cache.
+viewer_dir=strix/interface/viewer/frontend
+viewer_stamp="$viewer_dir/node_modules/.amp-dependencies"
+viewer_dependencies="$(sha256sum "$viewer_dir/package.json" "$viewer_dir/package-lock.json"; node --version; npm --version)"
+if ! printf '%s\n' "$viewer_dependencies" | cmp -s - "$viewer_stamp"; then
+  npm --prefix "$viewer_dir" ci --no-audit --no-fund
+  printf '%s\n' "$viewer_dependencies" > "$viewer_stamp"
+else
+  echo 'Viewer dependencies match the lockfile and toolchain; reusing node_modules.'
+fi
+
+echo "==> Warming the Go module cache (${SECONDS}s)"
+(cd strix/interface/tui && go mod download)
+
+echo "==> Installing repository Git hooks (${SECONDS}s)"
+# Amp can own core.hooksPath for its own hooks. Never replace that configuration.
+if git config --get core.hooksPath >/dev/null; then
+  echo 'Preserving core.hooksPath; run make pre-commit to check all files explicitly.'
+else
+  uv run --frozen pre-commit install
+fi
+
+echo "==> Setup finished in $((SECONDS - started))s"
+echo 'Run amp orb services ensure when Docker is needed; setup does not start services or scans.'

@@ -40,6 +40,50 @@ Thank you for your interest in contributing to Strix! This guide will help you g
    uv run strix --target https://example.com
    ```
 
+### Development in Amp orbs
+
+Amp automatically runs the executable `.agents/setup` on a fresh orb. It prepares
+Python 3.12, checksum-verified Node 24 and Go 1.24.x toolchains, system build tools,
+ShellCheck, Docker, and dependencies from the Python, npm, and Go lockfiles. It does
+not start scans, download the large Strix sandbox image, authenticate accounts, or
+require API keys. It preserves any existing `core.hooksPath` (including Amp's hooks);
+otherwise it installs the project's pre-commit hook.
+
+Rerun `.agents/setup` after changing dependencies. It is safe to run repeatedly.
+Amp snapshots the prepared filesystem; an exact snapshot skips setup entirely.
+When setup runs on a stale snapshot, it reuses installed toolchains and Python/Go
+caches. The viewer's `node_modules` is reused when its package files and Node/npm
+versions match the last successful install; changed inputs trigger `npm ci`.
+Toolchains are available to new login shells and supervised services without
+activating a virtualenv. Use `uv run --frozen` for Python commands. No resume hook
+is necessary; dependency installation belongs in setup and services are supervised.
+
+Useful validation commands:
+
+```bash
+bash -n .agents/setup && shellcheck .agents/setup
+uv run --frozen pytest -q
+make check-all
+make tui-test tui-lint tui-build
+make viewer
+```
+
+Python tests, TUI checks, and viewer builds need no Docker daemon or paid services.
+For an authorized local scan, run `amp orb services ensure` to start the Docker
+daemon declared in `.amp/services.yaml`, then wait for `docker info` to succeed.
+Docker is available only over its local Unix socket, never through a portal.
+Provider restrictions can still prevent containers from running; verify Docker
+before starting a scan and do not silently substitute a paid cloud scan.
+
+For a viewer portal after a run exists, follow **Developing with Amp** in
+[`AGENTS.md`](AGENTS.md). Keep viewer authorization tokens private. Store LLM keys
+and Strix cloud tokens in Amp **Secrets & Env Vars**, not repository files or setup
+scripts. Cloud login, source uploads, scan charges, and billing are not part of
+development setup.
+
+These files configure future orbs once they reach the Amp project's default branch.
+Until then, they apply only to the checkout where you run them.
+
 ## 📚 Contributing Skills
 
 Skills are specialized knowledge packages that enhance agent capabilities. See [strix/skills/README.md](strix/skills/README.md) for detailed guidelines.

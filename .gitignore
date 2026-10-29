@@ -98,3 +98,7 @@ schema.graphql
 /.benchmarks/
 /references/
 /strix_runs_main/
+
+# Amp-generated portal state and review artifacts (keep .amp/services.yaml tracked)
+/.amp/portals/
+/.amp/in/

@@ -1,0 +1,4 @@
+services:
+  docker:
+    platforms: [linux]
+    command: 'sudo dockerd --host=unix:///var/run/docker.sock --group="$(id -gn)"'
