@@ -249,11 +249,6 @@ export default function App() {
     userSetView("history");
   }, [refreshRuns, userSetView]);
 
-  const onPastRunsVerified = useCallback(async () => {
-    await refreshAuth();
-    await refreshRuns();
-  }, [refreshAuth, refreshRuns]);
-
   const onForget = useCallback(async () => {
     await forgetAuth();
     await refreshAuth();
@@ -302,7 +297,7 @@ export default function App() {
             </a>
             {run && <LiveIndicator finished={run.finished} />}
             <div className="ml-auto flex items-center gap-3">
-              {verified && runs && !runs.locked && runs.runs.length > 0 && (
+              {runs && !runs.locked && runs.runs.length > 0 && (
                 <RunSwitcher
                   runs={runs}
                   activeRun={activeRun}
@@ -365,7 +360,6 @@ export default function App() {
                 runs={runs}
                 activeRun={activeRun}
                 onSelectRun={selectRun}
-                onVerified={() => void onPastRunsVerified()}
               />
             </div>
           ) : !run && !error ? (

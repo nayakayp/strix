@@ -67,7 +67,7 @@ def run_list_entry(run_dir: Path) -> dict[str, Any]:
     """Compact summary of a single run for the history list."""
     record = read_run_summary(run_dir)
     return {
-        "name": record.get("run_name") or run_dir.name,
+        "name": run_dir.name,
         "target": primary_target(record),
         "scan_mode": record.get("scan_mode"),
         "status": record.get("status"),
@@ -78,15 +78,11 @@ def run_list_entry(run_dir: Path) -> dict[str, Any]:
     }
 
 
-def build_runs_payload(base_dir: Path, *, verified: bool) -> dict[str, Any]:
-    """The /api/runs payload. Gates the run list behind email verification.
-
-    The count is always advertised so the UI can tease the history, but the
-    entries only appear once the viewer is verified.
-    """
+def build_runs_payload(base_dir: Path, *, authorized: bool) -> dict[str, Any]:
+    """List local runs for callers holding the viewer's session capability."""
     run_dirs = _iter_run_dirs(base_dir)
     count = len(run_dirs)
-    if not verified:
+    if not authorized:
         return {"locked": True, "count": count, "runs": []}
     return {"locked": False, "count": count, "runs": [run_list_entry(d) for d in run_dirs]}
 
@@ -235,14 +231,10 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
 
         def _handle_api(self, path: str, query: dict[str, list[str]]) -> None:
-            # The cross-run history list (/api/runs) unlocks its entries only for
-            # a caller that holds this process's session capability *and* is
-            # email verified, so merely reaching an exposed --host port never
-            # leaks the run list (the payload still advertises the count as a
-            # teaser).
+            # Local history needs the session capability, not a cloud email login.
+            # Merely reaching an exposed --host port never reveals run entries.
             if path == "/api/runs":
-                unlocked = self._has_session() and auth.is_verified()
-                payload = build_runs_payload(state.base_dir, verified=unlocked)
+                payload = build_runs_payload(state.base_dir, authorized=self._has_session())
                 self._send_json(HTTPStatus.OK, payload)
                 return
             if path == "/api/capabilities":
@@ -266,13 +258,6 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             run_dir = resolve_run_dir(state.base_dir, run_param, state.run_dir)
             if run_dir is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown run"})
-                return
-
-            # Any run other than the one used to launch the viewer is part of the
-            # email-gated history. The session check above applies to both paths;
-            # verification adds a second gate for historical run data.
-            if run_dir.resolve() != state.run_dir.resolve() and not auth.is_verified():
-                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unverified"})
                 return
 
             if path == "/api/run":

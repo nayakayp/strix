@@ -40,6 +40,55 @@ Thank you for your interest in contributing to Strix! This guide will help you g
    uv run strix --target https://example.com
    ```
 
+### Dashboard UI development (no scan required)
+
+The dashboard in this repository is the local run viewer, not the managed
+`app.strix.ai` application. It uses React, TypeScript, Tailwind CSS and Vite, with
+a Python HTTP server reading run artifacts.
+
+With Python 3.12+, uv and Node.js 24 installed, run from the repository root:
+
+```bash
+uv sync --frozen
+npm --prefix strix/interface/viewer/frontend ci
+make viewer-dev
+```
+
+Open the local URL printed by Vite. Edit
+`strix/interface/viewer/frontend/src/` for hot-reloading UI changes. Restart
+`make viewer-dev` after editing Python code or the demo fixtures in
+`scripts/viewer_dev.py`. Set `PORT` to choose a port (default: 5173).
+
+The launcher creates disposable synthetic data: three runs, findings with
+different severities, and a two-agent graph. It never scans a target, starts
+Docker, uses an LLM, or writes to `strix_runs/`. Telemetry is disabled and viewer
+email credentials are isolated from your normal profile. The Vite server proxies
+the demo API with a server-side capability; do not expose this development server
+to untrusted users or point its proxy at real scan data.
+
+Past runs lists every run directory containing `run.json` alongside the launched
+run, newest activity first. Select a row to open its findings and report; no email
+verification is required. In normal use this is the current project's
+`strix_runs/`, not a search across the whole machine or Strix Cloud.
+
+Email report delivery and feedback retain their existing Strix relay integration;
+they are not mocked or unlocked by this demo. Using those forms can contact Strix.
+Live scan execution and steering are unavailable.
+
+In an Amp orb, dependencies are already prepared. Start a supervised preview:
+
+```bash
+amp orb service start viewer-dev --command 'make viewer-dev' --portal --title 'Strix dashboard development'
+```
+
+Use the portal URL returned by Amp, not the sandbox-local Vite URL. No viewer
+token needs to be copied into the browser for this synthetic preview.
+
+Before shipping frontend changes, run `make viewer` and include both the source
+and rebuilt `strix/interface/viewer/static/` bundle. To inspect real results
+instead, use `uv run --frozen strix view <run-name>` with an existing run and keep
+its authorization URL private.
+
 ### Development in Amp orbs
 
 Amp automatically runs the executable `.agents/setup` on a fresh orb. It prepares

@@ -9,6 +9,16 @@ import { fileURLToPath, URL } from "node:url";
 export default defineConfig({
   base: "./",
   plugins: [react(), tailwindcss()],
+  // Set only by scripts/viewer_dev.py for its disposable demo backend.
+  // These server-side variables are never exposed as VITE_* client variables.
+  server: {
+    proxy: process.env.STRIX_VIEWER_DEV_BACKEND ? {
+      "/api": {
+        target: process.env.STRIX_VIEWER_DEV_BACKEND,
+        headers: { Cookie: process.env.STRIX_VIEWER_DEV_COOKIE ?? "" },
+      },
+    } : undefined,
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

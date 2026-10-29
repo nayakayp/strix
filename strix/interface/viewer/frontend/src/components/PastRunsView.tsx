@@ -1,15 +1,10 @@
-import { useState } from "react";
-import { History, ChevronRight, Terminal } from "lucide-react";
+import { ChevronRight, Terminal } from "lucide-react";
 import type { RunListEntry, RunsPayload, RunSeverityCounts } from "@/data/serverSource";
 import { runTitle } from "@/lib/target-utils";
-import { trackCta } from "@/lib/cta";
-import EmailVerifyInline from "@/components/EmailVerifyInline";
 
 /**
- * "Past runs" panel. Unverified users see a tease with the run count and a
- * verify affordance (the launched run stays fully visible; the CLI
- * `strix view <name>` still works). Verified users get the full history and can
- * switch the active run, which threads ?run=<name> through the data fetches.
+ * Local history for the authorized viewer session. Selecting a run threads
+ * ?run=<directory-name> through the data fetches; no email login is required.
  */
 
 const SEV = [
@@ -73,52 +68,31 @@ interface PastRunsViewProps {
   runs: RunsPayload | null;
   activeRun: string | null;
   onSelectRun: (name: string) => void;
-  onVerified: () => void;
 }
 
 export default function PastRunsView({
   runs,
   activeRun,
   onSelectRun,
-  onVerified,
 }: PastRunsViewProps) {
-  const count = runs?.count ?? 0;
-  const [showVerify, setShowVerify] = useState(false);
+  if (!runs) {
+    return (
+      <div className="rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-8 text-center text-sm text-[#888]" role="status">
+        Loading past runs…
+      </div>
+    );
+  }
 
-  if (!runs || runs.locked) {
+  if (runs.locked) {
     return (
       <div className="rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-8 text-center">
-        <div
-          className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-xl"
-          style={{ border: "1px solid #2a2a2a", background: "rgba(255,255,255,0.04)" }}
-        >
-          <History className="h-5 w-5 text-[#888]" aria-hidden="true" />
-        </div>
-        <h2 className="text-base font-semibold text-white">Browse every run on this machine</h2>
+        <h2 className="text-base font-semibold text-white">Open your authorized viewer link</h2>
         <p className="mx-auto mt-1.5 max-w-md text-sm text-[#888]">
-          You have {count} past {count === 1 ? "run" : "runs"} on this machine.
+          Use the private URL printed by Strix to browse local pentest history.
         </p>
-        {showVerify ? (
-          <>
-            <p className="mx-auto mt-3 max-w-sm text-xs text-[#666]">
-              Verify your email with a one-time code to unlock the full history.
-            </p>
-            <EmailVerifyInline onVerified={onVerified} />
-          </>
-        ) : (
-          <button
-            onClick={() => {
-              trackCta("history_unlock", "past_runs");
-              setShowVerify(true);
-            }}
-            className="mt-4 cursor-pointer rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black transition-opacity hover:opacity-90"
-          >
-            View runs
-          </button>
-        )}
         <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-[#555]">
           <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
-          Or open one from the CLI with{" "}
+          Start the viewer with{" "}
           <code className="font-mono text-[#888]">strix view &lt;name&gt;</code>
         </p>
       </div>
@@ -128,7 +102,7 @@ export default function PastRunsView({
   if (runs.runs.length === 0) {
     return (
       <div className="rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-8 text-center text-sm text-[#888]">
-        No past runs found on this machine yet.
+        No past runs found in this viewer’s runs directory yet.
       </div>
     );
   }

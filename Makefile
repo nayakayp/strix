@@ -1,4 +1,4 @@
-.PHONY: help install dev-install format lint format-check lint-check type-check security check-all clean pre-commit setup-dev dev viewer wheel tui-build tui-test tui-lint
+.PHONY: help install dev-install format lint format-check lint-check type-check security check-all clean pre-commit setup-dev dev viewer viewer-dev wheel tui-build tui-test tui-lint
 
 TUI_BINARY := build/sidecar/strix-tui$(if $(filter Windows_NT,$(OS)),.exe)
 
@@ -20,6 +20,7 @@ help:
 	@echo "Development:"
 	@echo "  pre-commit    - Run pre-commit hooks on all files"
 	@echo "  viewer        - Rebuild the local-viewer SPA (commit the output)"
+	@echo "  viewer-dev    - Run the hot-reloading dashboard with synthetic demo data"
 	@echo "  wheel         - Build a platform wheel with the bundled Go sidecar"
 	@echo "  clean         - Clean up cache files and artifacts"
 	@echo "  tui-build     - Build the Bubble Tea TUI"
@@ -85,6 +86,9 @@ viewer:
 	@echo "🖥️  Building the local-viewer SPA..."
 	cd strix/interface/viewer/frontend && npm ci && npm run build
 	@echo "✅ Viewer built to strix/interface/viewer/static/ (commit the changes)."
+
+viewer-dev:
+	uv run --frozen python scripts/viewer_dev.py
 
 wheel:
 	uv build --wheel

@@ -619,48 +619,51 @@ def test_report_send_rejects_live_run(tmp_path: Path, monkeypatch: pytest.Monkey
         httpd.server_close()
 
 
-def test_historical_run_data_requires_verification(
+def test_historical_run_data_requires_session_not_email_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     launched = _make_run(tmp_path, "launched", status="completed", end_time="2026-01-01T00:00:00Z")
-    _make_run(tmp_path, "other", status="completed", end_time="2026-01-01T00:00:00Z")
+    other = _make_run(tmp_path, "other", status="completed", end_time="2026-01-01T00:00:00Z")
+    (other / "vulnerabilities.json").write_text(
+        json.dumps([{"id": "historical-finding", "severity": "high"}]), encoding="utf-8"
+    )
+    (other / "penetration_test_report.md").write_text("Historical report", encoding="utf-8")
     _bundle(tmp_path, monkeypatch)
-
-    verified = {"value": False}
-    monkeypatch.setattr("strix.interface.viewer.auth.is_verified", lambda: verified["value"])
+    monkeypatch.setattr("strix.interface.viewer.auth.is_verified", lambda: False)
 
     httpd, url, token = serve(launched, open_browser=False)
     try:
-        # The launched run needs the session capability, but not email verification.
-        assert _get_status(f"{url}/api/run") == 403
         cookie = _session_cookie(url, token)
-        assert _get_status(f"{url}/api/run", cookie=cookie) == 200
+        for endpoint in ("run", "vulnerabilities", "report", "transcript"):
+            assert _get_status(f"{url}/api/{endpoint}?run=other") == 403
+            assert _get_status(f"{url}/api/{endpoint}?run=other", cookie=cookie) == 200
 
-        # A different run needs the session capability first: a cookie-less
-        # caller is forbidden even once the machine is verified.
-        verified["value"] = True
-        assert _get_status(f"{url}/api/run?run=other") == 403
-
-        # With the cookie but not verified, the history gate returns 401.
-        verified["value"] = False
-        assert _get_status(f"{url}/api/run?run=other", cookie=cookie) == 401
-
-        # With both the cookie and verification, the historical run resolves.
-        verified["value"] = True
-        assert _get_status(f"{url}/api/run?run=other", cookie=cookie) == 200
+        _, _, body = _get(f"{url}/api/run?run=other", cookie=cookie)
+        assert json.loads(body)["run_name"] == "other"
+        _, _, body = _get(f"{url}/api/vulnerabilities?run=other", cookie=cookie)
+        assert json.loads(body)[0]["id"] == "historical-finding"
+        _, _, body = _get(f"{url}/api/report?run=other", cookie=cookie)
+        assert json.loads(body)["markdown"] == "Historical report"
+        assert _get_status(f"{url}/api/run?run=missing", cookie=cookie) == 404
+        assert _get_status(f"{url}/api/run?run=../outside", cookie=cookie) == 404
     finally:
         httpd.shutdown()
         httpd.server_close()
 
 
-def test_runs_list_requires_session_and_verification(
+def test_runs_list_requires_session_not_email_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     launched = _make_run(tmp_path, "launched", status="completed", end_time="2026-01-01T00:00:00Z")
-    _make_run(tmp_path, "other", status="completed", end_time="2026-01-01T00:00:00Z")
+    other = _make_run(tmp_path, "other", status="completed", end_time="2026-01-01T00:00:00Z")
+    (other / "run.json").write_text(
+        json.dumps({"run_name": "Friendly display name", "status": "completed"}), encoding="utf-8"
+    )
+    os.utime(launched / "run.json", (1_000_000_000, 1_000_000_000))
+    os.utime(other / "run.json", (2_000_000_000, 2_000_000_000))
     _bundle(tmp_path, monkeypatch)
 
-    monkeypatch.setattr("strix.interface.viewer.auth.is_verified", lambda: True)
+    monkeypatch.setattr("strix.interface.viewer.auth.is_verified", lambda: False)
 
     def _runs(cookie: str | None) -> dict[str, object]:
         headers = {"Cookie": cookie} if cookie else {}
@@ -670,17 +673,20 @@ def test_runs_list_requires_session_and_verification(
 
     httpd, url, token = serve(launched, open_browser=False)
     try:
-        # A cookie-less caller (even with the machine verified) only sees the
-        # teaser count, never the run entries.
+        # A cookie-less caller never sees run entries.
         payload = _runs(None)
         assert payload["locked"] is True
         assert payload["count"] == 2
         assert payload["runs"] == []
 
-        # With the session cookie and verification, the entries unlock.
-        payload = _runs(_session_cookie(url, token))
+        # A session unlocks history without email verification, newest first.
+        cookie = _session_cookie(url, token)
+        payload = _runs(cookie)
         assert payload["locked"] is False
-        assert {r["name"] for r in payload["runs"]} == {"launched", "other"}  # type: ignore[attr-defined]
+        names = [r["name"] for r in payload["runs"]]  # type: ignore[attr-defined]
+        assert names == ["other", "launched"]
+        # Listed names must resolve even if the record has a different display name.
+        assert _get_status(f"{url}/api/run?run={names[0]}", cookie=cookie) == 200
     finally:
         httpd.shutdown()
         httpd.server_close()

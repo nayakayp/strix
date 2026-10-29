@@ -30,23 +30,23 @@ def _make_run(base: Path, name: str, *, severity: str = "high") -> Path:
     return run_dir
 
 
-def test_runs_payload_locked_when_unverified(tmp_path: Path) -> None:
+def test_runs_payload_locked_without_session(tmp_path: Path) -> None:
     base = tmp_path / "strix_runs"
     _make_run(tmp_path, "alpha")
     _make_run(tmp_path, "beta")
 
-    payload = build_runs_payload(base, verified=False)
+    payload = build_runs_payload(base, authorized=False)
     assert payload["locked"] is True
     assert payload["count"] == 2
     assert payload["runs"] == []
 
 
-def test_runs_payload_lists_when_verified(tmp_path: Path) -> None:
+def test_runs_payload_lists_with_session(tmp_path: Path) -> None:
     base = tmp_path / "strix_runs"
     _make_run(tmp_path, "alpha", severity="critical")
     _make_run(tmp_path, "beta", severity="info")
 
-    payload = build_runs_payload(base, verified=True)
+    payload = build_runs_payload(base, authorized=True)
     assert payload["locked"] is False
     assert payload["count"] == 2
     assert len(payload["runs"]) == 2
@@ -59,7 +59,7 @@ def test_runs_payload_lists_when_verified(tmp_path: Path) -> None:
 
 
 def test_runs_payload_empty_base(tmp_path: Path) -> None:
-    payload = build_runs_payload(tmp_path / "strix_runs", verified=True)
+    payload = build_runs_payload(tmp_path / "strix_runs", authorized=True)
     assert payload == {"locked": False, "count": 0, "runs": []}
 
 
