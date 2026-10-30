@@ -11,7 +11,7 @@ strix view my-run-name                        # a specific run under ./strix_run
 strix view --host 0.0.0.0 --port 8080 --no-open
 ```
 
-The UI ships prebuilt with Strix, so there is no extra install and no JavaScript build step. The dashboard reads the run files straight off disk. Nothing leaves your machine, and you do not need a cloud account.
+The UI ships prebuilt with Strix, so there is no extra install and no JavaScript build step. Reading saved runs does not upload them, and you do not need a cloud account. Launching scans uses your configured LLM provider; report-email and feedback forms retain their existing relay integration.
 
 ## Options
 
@@ -31,19 +31,147 @@ The UI ships prebuilt with Strix, so there is no extra install and no JavaScript
   Do not open the browser automatically.
 </ParamField>
 
+<ParamField path="--manage-scans" type="boolean">
+  Enable starting and stopping local scans from the authorized dashboard. Off by default.
+</ParamField>
+
 ## What Is In The Dashboard
 
 - **Overview** — run status, target, and a severity breakdown of everything found so far.
 - **Vulnerabilities** — each validated finding with its severity, details, and reproduction steps.
 - **Agent graph** — a live map of the multi-agent team, and what each agent is doing.
 - **Steering** — send instructions to a live scan to redirect the agents during the run. Steering works only in the dashboard the running scan opens. A standalone `strix view` has no live scan to steer.
-- **History** — browse past runs on this machine and move between them. Verify your email address in the dashboard to unlock the other runs.
+- **History** — browse runs alongside the opened run in the same `strix_runs/` directory. The private viewer link authorizes access; email verification is not required.
+- **Local scans** — start a headless scan, inspect its status and log, stop it, and open its results. Available only with `--manage-scans`.
 - **Reports** — generate a shareable report and send it by email. Verify your email address first.
+
+## Managing Local Scans
+
+```bash
+uv run --frozen strix view --manage-scans --port 8080 --no-open
+```
+
+Open the private URL printed by the command, then choose **Local scans**. This
+works before the first run exists. Management currently requires Linux or macOS
+and a Python installation (uv/pip), not the standalone bundled executable.
+
+Configure Docker, the sandbox image, and your LLM provider as you would for a
+normal CLI scan. The worker reuses the headless CLI and inherits the server's
+environment and CLI configuration. No provider key is entered in the browser.
+Local paths refer to the server, not the browser's computer; source directories
+are mounted writable, just as in the CLI. Only submit targets you may test.
+
+Each start requires a target, scan mode, LLM budget in USD, and explicit
+authorization. Set a positive amount for a spending cap, or **`-1` for unlimited
+LLM spending**. Zero, other negative values, and non-finite values are rejected.
+Unlimited jobs are shown as **Unlimited LLM budget**; their workers omit the
+CLI's `--max-budget` flag, using the engine's existing uncapped behavior.
+In-flight model calls can overshoot a finite budget. One
+dashboard-launched scan may run at a time; additional starts return `409` rather
+than queueing. Independently launched CLI scans are not managed or counted.
+
+Only **failed** jobs show **Rerun**. Confirm authorization again to create a new
+job with the same target, mode, budget (including `-1`), and saved instructions.
+The rerun uses the currently selected LLM settings and leaves the original job,
+logs, and results unchanged. This starts over; it does not resume a scan. Reruns
+are disabled while another scan is active. Completed, stopped, and interrupted
+jobs cannot be rerun through this action.
+
+Jobs and their logs are persisted in `strix_runs/<job-id>/job.json` and `job.log`,
+alongside normal run artifacts. Logs may contain sensitive scan output. The UI
+shows the last 32 KiB of the log; the full log remains on disk.
+
+Closing the browser does not stop the scan. Stopping the viewer stops its active
+child with SIGTERM, allowing normal CLI cleanup. After 30 seconds a stuck child
+is force-killed; inspect Docker for leftover scan containers if that occurs.
+Completed job history survives viewer restarts. After an unexpected viewer exit,
+an inherited owner lock prevents another manager from starting until its old
+worker exits; stale active records are then marked interrupted. There is no
+automatic restart, adoption of saved PIDs, or scan resumption.
+
+The session-protected JSON endpoints are:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/jobs` | List jobs, status, exit code, and result availability |
+| POST | `/api/jobs` | Start with `target`, `scan_mode`, `max_budget_usd`, `authorized: true`, and optional `instruction` |
+| POST | `/api/jobs/<id>/rerun` | Start a new job from a failed job with `authorized: true`; other statuses return `409` |
+| POST | `/api/jobs/<id>/stop` | Stop a job (safe to repeat) |
+| GET | `/api/jobs/<id>/log` | Read the log tail |
+
+Mutations require `Content-Type: application/json` and the viewer session cookie;
+cross-origin browser requests are rejected. This is a trusted, single-operator
+local service, not a multi-tenant public API. Keep it behind a firewall or an
+authenticated private proxy. Anyone with its authorized link can launch scans
+using the server's credentials and access server-local targets.
+
+### LLM Settings
+
+With `--manage-scans`, open **LLM settings** in the dashboard's top bar. Add
+connections for OpenAI, OpenRouter, Anthropic, Ollama, or an OpenAI-compatible
+endpoint. **Save & fetch models** saves the connection and lists its available
+models without generating tokens. Choose a fetched model or enter its provider
+model ID manually; model availability does not guarantee tool-calling support.
+Use the API root for Anthropic/Ollama and the versioned API base (usually `/v1`)
+for OpenAI-compatible endpoints. Addresses are reached from the viewer server.
+
+Set prices in **USD per million tokens**. Leave all prices blank for the engine's
+automatic accounting, or supply both input and output prices; zero means free.
+An omitted cached-input override uses the input price. Overrides are retained
+per model. OpenRouter's returned token prices can be copied into these fields
+with **Use fetched prices**. Prices affect estimates and LLM budget enforcement,
+not the provider's actual bill. For unrecognized custom models, supply manual
+prices to make budget estimates meaningful.
+
+**Save & use for new scans** selects the default connection/model for subsequent
+dashboard jobs. An already running job keeps its original connection and prices.
+**Use server CLI settings instead** restores the previous CLI/environment behavior;
+dashboard settings never overwrite the global CLI configuration.
+
+Profiles survive restarts in `~/.strix/dashboard/<workspace-hash>/llm-providers.json`.
+The hash identifies the workspace's canonical absolute path. The dashboard
+automatically migrates the old workspace `.strix/llm-providers.json`, verifies the
+saved data, then removes the old copy. Conflicting copies stop startup without
+overwriting either one. Keys remain **unencrypted**, with directory mode `0700`
+and file mode `0600`, and are never returned by the API. The credential directory
+is hidden behind an empty read-only mount for local scans and excluded from
+source uploads, even when scanning a parent/home directory or opting into hidden
+and sensitive files. It cannot itself be a scan target. Keep it out of backups
+you share. A blank API-key replacement retains the existing
+key; use the removal checkbox to clear it. Changing a connection's endpoint
+requires re-entering or explicitly removing its key. Model discovery does not
+follow redirects, to avoid forwarding credentials to another host.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/api/llm/settings` | Profiles and selected default, without keys |
+| POST | `/api/llm/providers` | Create/update a connection, model, and per-model prices |
+| POST | `/api/llm/models` | Fetch models for a saved provider `id` |
+| POST | `/api/llm/select` | Select a provider `id`, or `null` for CLI settings |
+| POST | `/api/llm/delete` | Remove a saved provider `id` |
+
+These endpoints use the same session, management opt-in, JSON-only, and
+cross-origin protections as scan jobs. Only configure endpoints you trust;
+the selected endpoint receives its saved API key.
+
+### Server Sizing
+
+For one scan using a hosted LLM, a reasonable starting estimate is **4 vCPUs,
+8 GB RAM, and 40–60 GB SSD**. For heavier browser/build workloads, start with
+**8 vCPUs and 16 GB RAM**. These are planning estimates, not benchmarked minimums;
+monitor actual memory, CPU, image size, and artifact growth. No GPU is needed
+unless you host the model yourself.
+
+Docker resource limits are opt-in: set `STRIX_SANDBOX_MEM_LIMIT`,
+`STRIX_SANDBOX_CPUS`, `STRIX_SANDBOX_SHM_SIZE`, and optionally
+`STRIX_SANDBOX_PIDS_LIMIT` in the server environment. Leave capacity for the host
+and viewer outside the sandbox limits. The job budget limits estimated LLM
+spending, not server CPU, memory, or wall-clock time.
 
 ## Sharing The Link
 
 <Warning>
-  The token in the printed URL grants access to the run data, and to the steering of a live scan. Share it only with trusted users.
+  The token in the printed URL grants access to run data and live steering. With `--manage-scans`, it also grants scan execution using the server's provider credentials. Share it only with trusted users.
 </Warning>
 
 To reach the viewer from another machine, start it with `--host 0.0.0.0` and replace `0.0.0.0` in the printed URL with a reachable IP address or hostname. Restrict the port with your firewall. A request without the token-derived session cannot read run data.

@@ -17,7 +17,8 @@ RUN mkdir -p /out/bin && \
     go install -v github.com/projectdiscovery/cvemap/cmd/vulnx@latest && \
     go install -v github.com/jaeles-project/gospider@latest && \
     go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
-    go install -v golang.org/x/vuln/cmd/govulncheck@latest
+    go install -v golang.org/x/vuln/cmd/govulncheck@latest && \
+    go clean -cache -modcache
 
 # ---------------------------------------------------------------------------
 # Runtime stage
@@ -106,9 +107,9 @@ RUN mkdir -p /home/pentester/.npm-global
 RUN npm install -g retire@latest && \
     npm install -g eslint@latest && \
     npm install -g js-beautify@latest && \
-    npm install -g @ast-grep/cli@latest && \
-    npm install -g tree-sitter-cli@latest && \
-    npm install -g agent-browser@0.26.0 && \
+    npm install -g --allow-scripts=@ast-grep/cli @ast-grep/cli@latest && \
+    npm install -g --allow-scripts=tree-sitter-cli tree-sitter-cli@latest && \
+    npm install -g --allow-scripts=agent-browser agent-browser@0.26.0 && \
     npm cache clean --force && \
     # ast-grep ships two identical binaries (`ast-grep` and `sg`); dedupe (~52MB)
     ln -sf ast-grep /home/pentester/.npm-global/lib/node_modules/@ast-grep/cli/sg

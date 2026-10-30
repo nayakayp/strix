@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from agents.sandbox.entries import LocalDir
 from agents.sandbox.manifest import Manifest
+from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 from strix.runtime import session_manager
 from strix.runtime.backends import (
@@ -46,6 +47,67 @@ def test_source_becomes_writable_bind_mount(tmp_path: Path) -> None:
             "read_only": False,
         }
     ]
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_home_bind_mount_hides_dashboard_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_only: bool
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    secret_dir = tmp_path / ".strix" / "dashboard"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "profiles.json").write_text("synthetic-private-key")
+    mounts = build_bind_mounts([_source("home", str(tmp_path), read_only=read_only)])
+    assert mounts == [
+        {"source": str(tmp_path), "target": "/workspace/home", "read_only": read_only},
+        {"type": "tmpfs", "target": "/workspace/home/.strix/dashboard", "read_only": True},
+    ]
+    # Metadata remounts must not bypass the mask through an alias.
+    (tmp_path / ".git").symlink_to(secret_dir, target_is_directory=True)
+    with pytest.raises(ValueError, match="credential storage"):
+        build_bind_mounts([_source("home", str(tmp_path), protect_metadata=True)])
+
+
+@pytest.mark.parametrize("builder", [build_bind_mounts, build_manifest_entries])
+def test_credential_directory_cannot_be_a_source_even_through_an_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, builder: Any
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    secret_dir = tmp_path / ".strix" / "dashboard" / "workspace-id"
+    secret_dir.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(secret_dir, target_is_directory=True)
+    with pytest.raises(ValueError, match="credential storage"):
+        builder([_source("alias", str(alias))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ancestor", [False, True])
+async def test_source_upload_materializes_code_without_dashboard_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ancestor: bool
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    secret_dir = home / ".strix" / "dashboard" / "workspace-id"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "llm-providers.json").write_text("synthetic-private-key")
+    (secret_dir / "llm-providers.json.tmp").write_text("synthetic-temporary-key")
+    (home / "app.py").write_text("print('safe code')")
+    (home / ".strix" / "notes.txt").write_text("safe notes")
+    entries = build_manifest_entries([_source("source", str(tmp_path if ancestor else home))])
+    output = tmp_path / "materialized"
+    client = UnixLocalSandboxClient()
+    session = await client.create(manifest=Manifest(root=str(output), entries=entries))
+    try:
+        await session.start()
+        copied_home = output / "source" / "home" if ancestor else output / "source"
+        assert (copied_home / "app.py").read_text() == "print('safe code')"
+        assert (copied_home / ".strix" / "notes.txt").read_text() == "safe notes"
+        assert not (copied_home / ".strix" / "dashboard").exists()
+    finally:
+        await session.aclose()
+        await client.delete(session)
 
 
 def test_git_dir_is_remounted_read_only_when_protected(tmp_path: Path) -> None:

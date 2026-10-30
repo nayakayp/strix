@@ -190,7 +190,7 @@ class StrixDockerSandboxSession(DockerSandboxSession):
 
 class StrixDockerSandboxClient(DockerSandboxClient):
     # Host directories to bind-mount into the container, set by the docker
-    # backend before ``create()``. Each item is ``{source, target, read_only}``.
+    # backend before ``create()``. Empty read-only tmpfs mounts hide credentials.
     strix_bind_mounts: list[dict[str, Any]] | None = None
 
     async def _create_container(
@@ -274,9 +274,10 @@ class StrixDockerSandboxClient(DockerSandboxClient):
                 mounts.append(
                     DockerSDKMount(
                         target=spec["target"],
-                        source=spec["source"],
-                        type="bind",
+                        source=spec.get("source"),
+                        type=spec.get("type", "bind"),
                         read_only=spec.get("read_only", False),
+                        tmpfs_mode=0o700 if spec.get("type") == "tmpfs" else None,
                     )
                 )
 

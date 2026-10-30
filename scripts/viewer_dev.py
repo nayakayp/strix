@@ -1,32 +1,41 @@
-"""Run the hot-reloading viewer against disposable, synthetic scan output."""  # noqa: INP001
+"""Hot-reloading viewer: synthetic preview, or opt-in local scan management."""  # noqa: INP001
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 from rich.console import Console
 
+from strix.core.paths import latest_run_dir, runs_base_dir
 from strix.interface.viewer import auth
 from strix.interface.viewer.server import SESSION_COOKIE_PREFIX, serve
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--manage-scans",
+        action="store_true",
+        help="Use real local history and LLM settings; allow explicitly authorized scans.",
+    )
+    args = parser.parse_args()
     # Supervised service stops must clean up the child process and demo directory too.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    root = Path(__file__).resolve().parents[1]
-    frontend = root / "strix" / "interface" / "viewer" / "frontend"
-    npm = shutil.which("npm")
-    if npm is None or not (frontend / "node_modules").is_dir():
-        raise SystemExit(
-            "Install Node.js 24 and run: npm --prefix strix/interface/viewer/frontend ci"
-        )
+    os.environ["STRIX_TELEMETRY"] = "false"
+    if args.manage_scans:
+        if os.environ.get("AMP_ORB") == "1":
+            _ensure_orb_docker()
+        _serve(latest_run_dir() or runs_base_dir() / ".dashboard", manage_scans=True)
+        return
 
     # Never write demo records among real scan results or start a scan.
     with TemporaryDirectory(prefix="strix-viewer-demo-") as temporary:
@@ -110,39 +119,93 @@ def main() -> None:
             modified = (run_dir / "run.json").stat().st_mtime - days_ago * 86400
             os.utime(previous / "run.json", (modified, modified))
 
-        os.environ["STRIX_TELEMETRY"] = "false"
         auth.AUTH_PATH = Path(temporary) / "viewer-auth.json"
-        httpd, backend_url, token = serve(run_dir, open_browser=False)
-        try:
-            env = os.environ.copy()
-            env["STRIX_VIEWER_DEV_BACKEND"] = backend_url
-            # Only the Vite server receives the capability; it never enters browser JS or logs.
-            port = httpd.server_address[1]
-            env["STRIX_VIEWER_DEV_COOKIE"] = f"{SESSION_COOKIE_PREFIX}_{port}={token}"
-            if public_url := env.get("PUBLIC_URL"):
-                env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] = urlsplit(public_url).hostname or ""
-            Console().print("Viewer development: synthetic data only; no scan or LLM required.")
-            subprocess.run(  # noqa: S603 - fixed npm command, resolved executable
-                [
-                    npm,
-                    "run",
-                    "dev",
-                    "--",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    env.get("PORT", "5173"),
-                    "--strictPort",
-                ],
-                cwd=frontend,
-                env=env,
-                check=True,
-            )
-        except KeyboardInterrupt:
-            pass
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+        _serve(run_dir)
+
+
+def _docker_ready(docker: str) -> bool:
+    try:
+        return (
+            subprocess.run(  # noqa: S603 - resolved executable and fixed arguments
+                [docker, "info"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _ensure_orb_docker() -> None:
+    docker, amp = shutil.which("docker"), shutil.which("amp")
+    if docker is None or amp is None:
+        raise SystemExit(
+            "Docker and Amp must be in PATH. Rerun .agents/setup if Docker is missing."
+        )
+    if _docker_ready(docker):
+        return
+    Console().print("Starting the supervised Docker service; waiting for its API…")
+    subprocess.run(  # noqa: S603 - resolved Amp executable, fixed service name
+        [amp, "orb", "service", "restart", "docker"], check=True, timeout=15
+    )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if _docker_ready(docker):
+            return
+        time.sleep(0.5)
+    raise SystemExit(
+        "Docker did not become ready. Check `amp orb service logs docker` and DOCKER_HOST. "
+        "This orb provider must support running Docker containers."
+    )
+
+
+def _serve(run_dir: Path, *, manage_scans: bool = False) -> None:
+    root = Path(__file__).resolve().parents[1]
+    frontend = root / "strix" / "interface" / "viewer" / "frontend"
+    npm = shutil.which("npm")
+    if npm is None or not (frontend / "node_modules").is_dir():
+        raise SystemExit(
+            "Install Node.js 24 and run: npm --prefix strix/interface/viewer/frontend ci"
+        )
+    httpd, backend_url, token = serve(run_dir, open_browser=False, manage_scans=manage_scans)
+    try:
+        env = os.environ.copy()
+        env["STRIX_VIEWER_DEV_BACKEND"] = backend_url
+        # Only the Vite server receives the capability; it never enters browser JS or logs.
+        port = httpd.server_address[1]
+        env["STRIX_VIEWER_DEV_COOKIE"] = f"{SESSION_COOKIE_PREFIX}_{port}={token}"
+        if public_url := env.get("PUBLIC_URL"):
+            env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] = urlsplit(public_url).hostname or ""
+        Console().print(
+            "Dashboard development: real local data; scan management enabled. "
+            "Starting scans can incur LLM charges. No scan starts automatically."
+            if manage_scans
+            else "Viewer development: synthetic data only; no scan or LLM required."
+        )
+        subprocess.run(  # noqa: S603 - fixed npm command, resolved executable
+            [
+                npm,
+                "run",
+                "dev",
+                "--",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                env.get("PORT", "5173"),
+                "--strictPort",
+            ],
+            cwd=frontend,
+            env=env,
+            check=True,
+        )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 if __name__ == "__main__":

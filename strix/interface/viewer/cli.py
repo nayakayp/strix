@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import time
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from strix.core.paths import (
     run_record_path,
     runs_base_dir,
 )
+from strix.interface.viewer.jobs import JobError
 from strix.interface.viewer.server import authorized_url, bundle_is_built, serve
 from strix.interface.viewer.transcript import read_run_summary
 
@@ -55,6 +57,11 @@ def run_view(argv: list[str]) -> None:
         action="store_true",
         help="Do not open the browser automatically.",
     )
+    parser.add_argument(
+        "--manage-scans",
+        action="store_true",
+        help="Allow the authorized dashboard to start/stop local scans (one at a time).",
+    )
     args = parser.parse_args(argv)
 
     console = Console()
@@ -66,14 +73,24 @@ def run_view(argv: list[str]) -> None:
         )
         raise SystemExit(1)
 
-    run_dir = _resolve_run_dir(args.run, console)
-
-    httpd, url, token = serve(
-        run_dir,
-        host=args.host,
-        port=args.port,
-        open_browser=not args.no_open,
+    # A managing dashboard must also work before the first scan exists.
+    run_dir = (
+        latest_run_dir() or runs_base_dir() / ".dashboard"
+        if args.manage_scans and not args.run
+        else _resolve_run_dir(args.run, console)
     )
+
+    try:
+        httpd, url, token = serve(
+            run_dir,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_open,
+            manage_scans=args.manage_scans,
+        )
+    except JobError as exc:
+        console.print(str(exc), style="bold red", markup=False)
+        raise SystemExit(1) from exc
     # The tokened URL is what authorizes the browser (steering, report sending,
     # history). Print it rather than the bare URL so the operator -- and only
     # the operator -- can open or share an authorized link.
@@ -81,7 +98,9 @@ def run_view(argv: list[str]) -> None:
 
     run_name = run_dir.name
     summary = read_run_summary(run_dir)
-    live = not summary.get("finished", False)
+    live = bool(summary.get("run_id") or summary.get("run_name")) and not summary.get(
+        "finished", False
+    )
 
     from strix.telemetry import posthog
 
@@ -89,14 +108,21 @@ def run_view(argv: list[str]) -> None:
 
     state_label = _state_label(summary)
     console.print()
-    console.print(f"Serving [bold white]{run_name}[/] ({state_label}) at:")
+    if not run_record_path(run_dir).is_file():
+        console.print("Serving the local scan dashboard at:")
+    else:
+        console.print(f"Serving [bold white]{run_name}[/] ({state_label}) at:")
     # Print the URL alone on its own line with soft_wrap so Rich never inserts a
     # wrap into the (long, tokened) link -- that keeps it selectable/copyable.
     console.print(f"  [#60a5fa]{open_url}[/]", soft_wrap=True)
     console.print("[dim]This link authorizes the browser; anyone you share it with can steer[/]")
     console.print("[dim]a live scan and browse history. Press Ctrl-C to stop the viewer.[/]")
+    if args.manage_scans:
+        console.print("[yellow]Scan management enabled: this link can launch paid local scans.[/]")
+        console.print("[dim]Stopping this viewer also stops its active scan.[/]")
     console.print()
 
+    previous_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         while True:
             time.sleep(1.0)
@@ -105,6 +131,7 @@ def run_view(argv: list[str]) -> None:
     finally:
         httpd.shutdown()
         httpd.server_close()
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def _state_label(summary: dict[str, object]) -> str:

@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
-from typing import TYPE_CHECKING
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
 
 
 SECRET_FILE_MODE = 0o600
+
+
+def dashboard_secrets_dir() -> Path:
+    """Host-only dashboard state, excluded from scan mounts and uploads."""
+    return (Path.home() / ".strix" / "dashboard").resolve()
+
+
+def dashboard_profiles_path(workspace: Path) -> Path:
+    identifier = hashlib.sha256(str(workspace.resolve()).encode()).hexdigest()
+    return dashboard_secrets_dir() / identifier / "llm-providers.json"
 
 
 def write_secret_text(path: Path, text: str) -> None:

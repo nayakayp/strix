@@ -408,7 +408,8 @@ def _bootstrap_scan(args: argparse.Namespace) -> None:
         report_error("model_connection_failed", exc)
         _print_model_connection_error(exc)
         sys.exit(1)
-    persist_current()
+    if getattr(args, "save_config", True):
+        persist_current()
     try:
         prepare_run(args)
     except ValueError as e:
@@ -427,7 +428,7 @@ def _force_utf8_streams() -> None:
             reconfigure(encoding="utf-8")
 
 
-def main() -> None:
+def main(*, run_name: str | None = None, save_config: bool = True) -> None:
     if sys.platform == "win32":
         _force_utf8_streams()
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -472,6 +473,11 @@ def main() -> None:
     start_import_warmup()
 
     args = parse_arguments()
+    # The local job manager reserves the run directory before CLI startup so
+    # startup failures and later artifacts share one stable job/run identity.
+    if run_name is not None:
+        args.reserved_run_name = run_name
+    args.save_config = save_config
     _fall_back_to_headless(args)
 
     start_background_check()

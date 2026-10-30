@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 import strix.interface.cloud.http as http  # noqa: PLR0402
+from strix.utils.secret_files import dashboard_secrets_dir
 
 
 if TYPE_CHECKING:
@@ -271,6 +272,10 @@ def select_source(
     include_archives: bool = False,
     exclude: list[str] | None = None,
 ) -> SourceManifest:
+    source = source.resolve()
+    protected = dashboard_secrets_dir()
+    if source.is_relative_to(protected):
+        raise http.CloudError("Dashboard credential storage cannot be uploaded as source.")
     excluded: Counter[str] = Counter()
     selected: list[SelectedFile] = []
     patterns = [*_load_ignore_patterns(source), *(exclude or [])]
@@ -301,6 +306,9 @@ def select_source(
             continue
         if not stat.S_ISREG(info.st_mode):
             excluded["symlink_or_non_file"] += 1
+            continue
+        if path.resolve().is_relative_to(protected):
+            excluded["dashboard_credentials"] += 1
             continue
         if not include_archives and _has_archive_magic(path):
             excluded["nested_archive"] += 1
@@ -440,6 +448,7 @@ def _walk_candidate_paths(
 ) -> Iterator[Path]:
     """Walk top-down so excluded dependency, VCS, and hidden trees are never traversed."""
     count = 0
+    protected = dashboard_secrets_dir()
     stack: list[tuple[Path, _ScandirIterator]] = []
     try:
         stack.append((source, os.scandir(source)))
@@ -462,6 +471,9 @@ def _walk_candidate_paths(
                 excluded["unreadable"] += 1
                 continue
             if is_directory:
+                if path.resolve().is_relative_to(protected):
+                    excluded["dashboard_credentials"] += 1
+                    continue
                 reason = _pruned_directory_reason(
                     relative,
                     include_hidden=include_hidden,

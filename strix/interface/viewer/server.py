@@ -1,9 +1,8 @@
 """Local HTTP server that serves the viewer SPA and a run's data from disk.
 
 Design notes:
-- Uses only the standard library (no new runtime dependency). The workload is
-  serving static files plus a handful of JSON reads off disk, so an async stack
-  buys nothing here.
+- Uses the standard-library HTTP server; provider discovery reuses httpx.
+  Static files and JSON reads do not need an async server stack.
 - The browser polls the JSON endpoints (~1s) rather than using SSE: a finished
   run stops polling, and short-lived polls survive sleep/network blips without
   server-side connection state, which suits a stdlib ThreadingHTTPServer.
@@ -23,11 +22,12 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from strix.core.paths import run_record_path
 from strix.interface.viewer import auth
+from strix.interface.viewer.jobs import JobError, ScanJobManager
 from strix.interface.viewer.transcript import (
     build_run_state,
     primary_target,
@@ -138,6 +138,7 @@ class _ViewerState:
         # Finalized in ``serve()`` once the port is known (the server binds
         # after this state is constructed); see SESSION_COOKIE_PREFIX.
         self.cookie_name = SESSION_COOKIE_PREFIX
+        self.job_manager: ScanJobManager | None = None
 
 
 def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
@@ -167,7 +168,9 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             try:
-                if path == "/api/event":
+                if path == "/api/jobs" or path.startswith(("/api/jobs/", "/api/llm/")):
+                    self._handle_job_post(path)
+                elif path == "/api/event":
                     self._handle_event()
                 elif path == "/api/auth/otp/start":
                     self._handle_otp_start()
@@ -240,7 +243,13 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             if path == "/api/capabilities":
                 # Steering is only possible when the viewer shares a live scan's
                 # coordinator + event loop (the TUI launcher wires a handler).
-                self._send_json(HTTPStatus.OK, {"can_steer": state.steer_handler is not None})
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "can_steer": state.steer_handler is not None,
+                        "can_manage_scans": state.job_manager is not None and self._has_session(),
+                    },
+                )
                 return
             if path == "/api/auth/status":
                 self._handle_auth_status()
@@ -251,6 +260,10 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             # reachability of an exposed --host port must not grant data access.
             if not self._has_session():
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+
+            if path in {"/api/jobs", "/api/llm/settings"} or path.startswith("/api/jobs/"):
+                self._handle_job_get(path)
                 return
 
             run_values = query.get("run")
@@ -270,6 +283,81 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(HTTPStatus.OK, build_run_state(run_dir))
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        def _handle_job_get(self, path: str) -> None:
+            manager = state.job_manager
+            if manager is None:
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "Scan management is disabled."})
+            elif path == "/api/llm/settings":
+                self._send_json(HTTPStatus.OK, manager.llm_profiles.public())
+            elif path == "/api/jobs":
+                self._send_json(HTTPStatus.OK, {"jobs": manager.list(), "max_concurrent": 1})
+            elif path.endswith("/log"):
+                name = unquote(path.removeprefix("/api/jobs/").removesuffix("/log"))
+                try:
+                    self._send_json(HTTPStatus.OK, {"text": manager.log(name)})
+                except JobError as exc:
+                    self._send_json(HTTPStatus(exc.status), {"error": str(exc)})
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        def _handle_job_post(self, path: str) -> None:
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+            manager = state.job_manager
+            if manager is None:
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "Scan management is disabled."})
+                return
+            # JSON-only mutations cannot be sent by cross-site HTML forms.
+            # Reject cross-origin browser requests even if a cookie is present.
+            origin = self.headers.get("Origin")
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" or (
+                origin and urlsplit(origin).netloc != self.headers.get("Host")
+            ):
+                self._send_json(
+                    HTTPStatus.FORBIDDEN, {"error": "Cross-origin requests are forbidden."}
+                )
+                return
+            if self.headers.get_content_type() != "application/json":
+                self._send_json(
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "Use application/json."}
+                )
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 32768:
+                    raise JobError("Request must contain at most 32 KiB of JSON.", 413)
+                parsed_body = json.loads(self.rfile.read(length))
+                if not isinstance(parsed_body, dict):
+                    raise JobError("Expected a JSON object.")
+                body = cast("dict[str, Any]", parsed_body)
+                if path == "/api/llm/models":
+                    self._send_json(
+                        HTTPStatus.OK, {"models": manager.llm_profiles.models(body.get("id"))}
+                    )
+                elif path.startswith("/api/llm/"):
+                    self._send_json(
+                        HTTPStatus.OK,
+                        manager.llm_profiles.update(path.removeprefix("/api/llm/"), body),
+                    )
+                elif path == "/api/jobs":
+                    self._send_json(HTTPStatus.ACCEPTED, {"job": manager.start(body)})
+                elif path.endswith(("/rerun", "/stop")):
+                    name, action = path.removeprefix("/api/jobs/").rsplit("/", 1)
+                    job = (
+                        manager.rerun(unquote(name), body)
+                        if action == "rerun"
+                        else manager.stop(unquote(name))
+                    )
+                    response_status = HTTPStatus.ACCEPTED if action == "rerun" else HTTPStatus.OK
+                    self._send_json(response_status, {"job": job})
+                else:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+            except (ValueError, UnicodeDecodeError) as exc:
+                status = exc.status if isinstance(exc, JobError) else HTTPStatus.BAD_REQUEST
+                message = str(exc) if isinstance(exc, JobError) else "Invalid JSON request."
+                self._send_json(HTTPStatus(status), {"error": message})
 
         def _handle_auth_status(self) -> None:
             # The cached verified email is only disclosed to a caller holding this
@@ -527,6 +615,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
 
@@ -544,6 +633,18 @@ def authorized_url(base_url: str, token: str) -> str:
     return f"{base_url}/?{urlencode({'token': token})}"
 
 
+class _ViewerServer(ThreadingHTTPServer):
+    job_manager: ScanJobManager | None = None
+
+    def server_close(self) -> None:
+        try:
+            if self.job_manager is not None:
+                self.job_manager.close()
+                self.job_manager = None
+        finally:
+            super().server_close()
+
+
 def serve(
     run_dir: Path,
     *,
@@ -551,6 +652,7 @@ def serve(
     port: int = 0,
     open_browser: bool = True,
     steer_handler: Callable[[str, str], bool] | None = None,
+    manage_scans: bool = False,
 ) -> tuple[ThreadingHTTPServer, str, str]:
     """Start the viewer server on a background thread; return (server, url, token).
 
@@ -570,12 +672,20 @@ def serve(
     handler = _make_handler(state)
 
     try:
-        httpd = ThreadingHTTPServer((host, port), handler)
+        httpd = _ViewerServer((host, port), handler)
     except OSError:
         if port == 0:
             raise
         logger.info("viewer port %s unavailable, falling back to an ephemeral port", port)
-        httpd = ThreadingHTTPServer((host, 0), handler)
+        httpd = _ViewerServer((host, 0), handler)
+
+    if manage_scans:
+        try:
+            state.job_manager = ScanJobManager(state.base_dir)
+            httpd.job_manager = state.job_manager
+        except Exception:
+            httpd.server_close()
+            raise
 
     httpd.daemon_threads = True
     bound_port = int(httpd.server_address[1])

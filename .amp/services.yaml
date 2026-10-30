@@ -1,4 +1,11 @@
 services:
+  dashboard:
+    command: uv run --frozen python scripts/viewer_dev.py --manage-scans
+    health: /api/capabilities
+    portal:
+      url: /
+      title: Strix local dashboard
+      description: Local history, scan management, and LLM settings. Starting scans requires Docker and can incur LLM charges.
   docker:
     platforms: [linux]
     command: 'sudo dockerd --host=unix:///var/run/docker.sock --group="$(id -gn)"'

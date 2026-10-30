@@ -107,6 +107,43 @@ def test_hidden_and_sensitive_files_need_separate_opt_ins(tmp_path: Path) -> Non
     )
 
 
+@pytest.mark.parametrize("git_source", [False, True])
+def test_dashboard_credentials_never_enter_source_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_source: bool
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    if git_source:
+        _git_source(tmp_path)
+    else:
+        (tmp_path / "app.py").write_text("print('safe code')")
+    secrets = tmp_path / ".strix" / "dashboard" / "workspace-id"
+    secrets.mkdir(parents=True)
+    (secrets / "llm-providers.json").write_text("synthetic-private-key")
+    (secrets / "llm-providers.json.tmp").write_text("synthetic-temporary-key")
+    (tmp_path / ".strix" / "notes.txt").write_text("safe notes")
+    bundle = source_upload.prepare_source(
+        str(tmp_path),
+        include_hidden=True,
+        include_sensitive=True,
+        include_archives=True,
+        exclude=[],
+    )
+    try:
+        with zipfile.ZipFile(bundle.archive_path) as archive:
+            assert "app.py" in archive.namelist()
+            assert ".strix/notes.txt" in archive.namelist()
+            assert not any(name.startswith(".strix/dashboard/") for name in archive.namelist())
+            assert b"synthetic-private-key" not in b"".join(
+                archive.read(name) for name in archive.namelist()
+            )
+    finally:
+        source_upload.remove_bundle(bundle)
+    alias = tmp_path / "secret-alias"
+    alias.symlink_to(secrets, target_is_directory=True)
+    with pytest.raises(http.CloudError, match="credential storage"):
+        source_upload.select_source(alias, include_hidden=True, include_sensitive=True)
+
+
 def test_hidden_opt_in_still_excludes_common_credential_paths(tmp_path: Path) -> None:
     paths = [
         ".aws/credentials",

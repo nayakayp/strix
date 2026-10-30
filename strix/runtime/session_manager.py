@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agents.sandbox.entries import BaseEntry, LocalDir
+from agents.sandbox.entries import BaseEntry, Dir, LocalDir, LocalFile
 from agents.sandbox.manifest import Environment, Manifest
 
 from strix.config import load_settings
@@ -22,6 +22,7 @@ from strix.runtime.backends import backend_supports_bind_mounts, get_backend
 from strix.runtime.caido_bootstrap import bootstrap_caido
 from strix.runtime.caido_handle import CaidoBootstrapHandle
 from strix.runtime.deferred_session import DeferredSandboxClient, DeferredSandboxSession
+from strix.utils.secret_files import dashboard_secrets_dir
 
 
 if TYPE_CHECKING:
@@ -79,6 +80,17 @@ def build_bind_mounts(local_sources: list[dict[str, Any]]) -> list[dict[str, Any
         bind_mounts.append({"source": str(resolved), "target": target, "read_only": read_only})
         if src.get("protect_metadata") and not read_only:
             bind_mounts.extend(_metadata_mounts(resolved, target))
+    protected = dashboard_secrets_dir()
+    # Check metadata mounts too: an in-tree metadata symlink may point at secrets.
+    for mount in list(bind_mounts):
+        source = Path(mount["source"]).resolve()
+        if source.is_relative_to(protected):
+            raise ValueError("Dashboard credential storage cannot be a scan source.")
+        if protected.is_relative_to(source):
+            relative = protected.relative_to(source).as_posix()
+            bind_mounts.append(
+                {"type": "tmpfs", "target": f"{mount['target']}/{relative}", "read_only": True}
+            )
     return bind_mounts
 
 
@@ -89,8 +101,26 @@ def build_manifest_entries(local_sources: list[dict[str, Any]]) -> dict[str | Pa
         host_path = src.get("source_path") or ""
         if not ws_subdir or not host_path:
             continue
-        entries[ws_subdir] = LocalDir(src=Path(host_path).expanduser().resolve())
+        entries[ws_subdir] = _source_entry(
+            Path(host_path).expanduser().resolve(), dashboard_secrets_dir()
+        )
     return entries
+
+
+def _source_entry(source: Path, protected: Path) -> BaseEntry:
+    if source.is_relative_to(protected):
+        raise ValueError("Dashboard credential storage cannot be a scan source.")
+    if not protected.is_relative_to(source):
+        return LocalDir(src=source)
+    # Expand only the ancestors of the credential store. Ordinary subtrees keep
+    # the SDK's no-follow, descriptor-pinned LocalDir/LocalFile copying behavior.
+    return Dir(
+        children={
+            child.name: _source_entry(child, protected) if child.is_dir() else LocalFile(src=child)
+            for child in source.iterdir()
+            if child != protected
+        }
+    )
 
 
 def _extra_file_rel_path(workspace_path: str) -> str | None:

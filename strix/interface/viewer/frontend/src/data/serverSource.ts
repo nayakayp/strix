@@ -213,6 +213,7 @@ export async function fetchRuns(): Promise<RunsPayload> {
 
 export interface Capabilities {
   can_steer: boolean;
+  can_manage_scans: boolean;
 }
 
 export type SteerResult = { ok: true } | { ok: false; error: string };
@@ -220,7 +221,85 @@ export type SteerResult = { ok: true } | { ok: false; error: string };
 /** GET /api/capabilities. can_steer is true only inside a live in-TUI scan. */
 export async function fetchCapabilities(): Promise<Capabilities> {
   const obj = (await getJson("/api/capabilities")) as Partial<Capabilities>;
-  return { can_steer: obj?.can_steer === true };
+  return { can_steer: obj?.can_steer === true, can_manage_scans: obj?.can_manage_scans === true };
+}
+
+export interface ScanJob {
+  id: string;
+  target: string;
+  scan_mode: string;
+  max_budget_usd: number;
+  status: string;
+  start_time: string;
+  end_time: string | null;
+  exit_code: number | null;
+  error: string | null;
+  has_run: boolean;
+  llm_model?: string | null;
+}
+
+export async function fetchJobs(): Promise<ScanJob[]> {
+  const data = await getJson("/api/jobs") as { jobs: ScanJob[] };
+  return data.jobs;
+}
+
+export async function startJob(body: Record<string, unknown>): Promise<void> {
+  const result = await postJson("/api/jobs", body);
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not start scan."));
+}
+
+export async function rerunJob(id: string): Promise<void> {
+  const result = await postJson(`/api/jobs/${encodeURIComponent(id)}/rerun`, { authorized: true });
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not rerun scan."));
+}
+
+export async function stopJob(id: string): Promise<void> {
+  const result = await postJson(`/api/jobs/${encodeURIComponent(id)}/stop`, {});
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not stop scan."));
+}
+
+export async function fetchJobLog(id: string): Promise<string> {
+  const data = await getJson(`/api/jobs/${encodeURIComponent(id)}/log`) as { text: string };
+  return data.text;
+}
+
+export interface ModelPrices {
+  input?: number | null;
+  output?: number | null;
+  cached_input?: number | null;
+}
+
+export interface LlmProvider {
+  id: string;
+  name: string;
+  kind: "openai" | "openrouter" | "anthropic" | "ollama" | "custom";
+  base_url: string;
+  model: string;
+  has_api_key: boolean;
+  prices: Record<string, ModelPrices>;
+}
+
+export interface LlmSettings {
+  providers: LlmProvider[];
+  selected_id: string | null;
+}
+
+export interface ProviderModel { id: string; prices?: ModelPrices }
+
+export async function fetchLlmSettings(): Promise<LlmSettings> {
+  return await getJson("/api/llm/settings") as LlmSettings;
+}
+
+export async function updateLlmSettings(action: "providers" | "select" | "delete", body: Record<string, unknown>): Promise<LlmSettings> {
+  const result = await postJson(`/api/llm/${action}`, body);
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not save LLM settings."));
+  return result.data as unknown as LlmSettings;
+}
+
+export async function fetchProviderModels(id: string): Promise<ProviderModel[]> {
+  const result = await postJson("/api/llm/models", { id });
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not fetch models."));
+  return result.data.models as ProviderModel[];
 }
 
 /** POST /api/agents/steer. Sends a steering instruction to a running agent. */

@@ -84,6 +84,57 @@ amp orb service start viewer-dev --command 'make viewer-dev' --portal --title 'S
 Use the portal URL returned by Amp, not the sandbox-local Vite URL. No viewer
 token needs to be copied into the browser for this synthetic preview.
 
+For hot reload with **real local history, scan management, and LLM settings**,
+run from the repository root:
+
+```bash
+uv run --frozen python scripts/viewer_dev.py --manage-scans
+```
+
+This mode reads `strix_runs/` and persists provider profiles in
+`~/.strix/dashboard/<workspace-hash>/llm-providers.json`, outside the project;
+existing workspace profiles migrate automatically. It works before the first
+scan exists. It does not create demo records or launch scans automatically.
+In Amp orbs (`AMP_ORB=1`), it checks Docker before serving the UI: a ready daemon
+is left running; otherwise it starts the declared `docker` service and waits for
+its API. Outside orbs,
+start Docker yourself. Launching a scan also requires an LLM provider and explicit
+authorization in the UI, and can incur LLM charges. Keep the development server
+private: its server-side proxy authorizes API requests without a separate viewer
+login. Do not use it as a public or multi-tenant deployment.
+
+In Amp, `.amp/services.yaml` declares this mode as `dashboard`, with a portal and
+an API health check. Starting or restarting it also ensures Docker is ready:
+
+```bash
+amp orb service restart dashboard
+```
+
+`amp orb services ensure` starts all declared services, including Docker. Amp
+supervises the dashboard across process restarts and orb pause/resume; no resume
+hook or generated portal hostname belongs in the repository. The declaration is
+available in future orbs once these changes reach the project's default branch.
+Provider credentials remain local and are never committed or installed by setup.
+For a Docker-free, read-only preview, keep using `make viewer-dev` without
+`--manage-scans`.
+
+If Docker works but the registry returns `404` for the configured sandbox tag,
+the image may not have been published yet. Build it locally from this checkout
+instead of switching to an older image that may lack security fixes:
+
+```bash
+STRIX_IMAGE=ghcr.io/usestrix/strix-sandbox:1.3.1 bash scripts/docker.sh
+```
+
+Use the image name configured for your run. `STRIX_IMAGE` selects the complete
+local image tag for this build; it does not push anything to the registry or
+launch a scan. Without it, the helper still builds `strix-sandbox:dev`, or
+`strix-sandbox:<tag>` when given a positional tag. The build context contains
+only the Dockerfile, entrypoint, and proxy client, not provider keys or run data.
+Building the tools takes time and several GiB of disk space; do this at runtime,
+not in `.agents/setup` or `.agents/resume`. Each new orb needs the image pulled
+or built in its own Docker daemon before a scan can use it.
+
 Before shipping frontend changes, run `make viewer` and include both the source
 and rebuilt `strix/interface/viewer/static/` bundle. To inspect real results
 instead, use `uv run --frozen strix view <run-name>` with an existing run and keep
@@ -118,8 +169,10 @@ make viewer
 ```
 
 Python tests, TUI checks, and viewer builds need no Docker daemon or paid services.
-For an authorized local scan, run `amp orb services ensure` to start the Docker
-daemon declared in `.amp/services.yaml`, then wait for `docker info` to succeed.
+Setup installs Docker, but does not start a daemon inside the shared snapshot.
+The managed dashboard starts it at runtime in each orb before accepting requests.
+For a CLI scan without that dashboard, run `amp orb services ensure` to start the
+Docker daemon declared in `.amp/services.yaml`, then wait for `docker info` to succeed.
 Docker is available only over its local Unix socket, never through a portal.
 Provider restrictions can still prevent containers from running; verify Docker
 before starting a scan and do not silently substitute a paid cloud scan.

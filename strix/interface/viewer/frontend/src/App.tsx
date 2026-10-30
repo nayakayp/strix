@@ -40,13 +40,15 @@ import { SIGNUP_URL, DEMO_URL, ctaUrl, trackCta } from "@/lib/cta";
 import { runTitle } from "@/lib/target-utils";
 import Sidebar from "@/components/Sidebar";
 import PastRunsView from "@/components/PastRunsView";
+import ScanJobsView from "@/components/ScanJobsView";
+import LlmSettingsView from "@/components/LlmSettingsView";
 import EmailReportView from "@/components/EmailReportView";
 import { RunDetails } from "@/components/RunDetails";
 import { TrustToast } from "@/components/TrustToast";
 import FeedbackView from "@/components/FeedbackView";
 import { ProInlineCta } from "@/components/ProCta";
 
-export type View = "overview" | "issues" | "agents" | "history" | "email" | "feedback";
+export type View = "overview" | "issues" | "agents" | "history" | "email" | "feedback" | "scans" | "settings";
 
 const TRUST_BANNER =
   "Your findings stay on your machine. They're rendered here locally in your browser and never uploaded or stored by Strix.";
@@ -67,6 +69,7 @@ export default function App() {
   // Whether this viewer can steer a live scan (true only inside the in-TUI
   // launcher that shares the running scan's coordinator + event loop).
   const [canSteer, setCanSteer] = useState(false);
+  const [canManageScans, setCanManageScans] = useState(false);
 
   const refreshAuth = useCallback(async () => {
     try {
@@ -89,11 +92,20 @@ export default function App() {
     void refreshRuns();
     // Capabilities never change over a session, so fetch once on mount.
     fetchCapabilities()
-      .then((caps) => setCanSteer(caps.can_steer))
+      .then((caps) => {
+        setCanSteer(caps.can_steer);
+        setCanManageScans(caps.can_manage_scans);
+      })
       .catch(() => {
         /* absence of steering is the safe default */
       });
   }, [refreshAuth, refreshRuns]);
+
+  useEffect(() => {
+    if (!canManageScans) return;
+    const timer = setInterval(() => void refreshRuns(), 2000);
+    return () => clearInterval(timer);
+  }, [canManageScans, refreshRuns]);
 
   // Live polling, scoped to the active run. Re-runs when the active run changes
   // so switching to a past run (?run=<name>) reloads its data; a finished run
@@ -223,6 +235,12 @@ export default function App() {
     setView(v);
   }, []);
 
+  useEffect(() => {
+    if (canManageScans && runs?.count === 0 && !initialViewAppliedRef.current) {
+      userSetView("scans");
+    }
+  }, [canManageScans, runs, userSetView]);
+
   const selectRun = useCallback((name: string) => {
     setActiveRun(name);
     setSelectedId(null);
@@ -283,7 +301,7 @@ export default function App() {
       <div className="flex-1 min-w-0">
         {/* Top bar */}
         <div className="border-b border-[#222]">
-          <div className="max-w-[88rem] mx-auto px-3 sm:px-6 py-4 flex items-center gap-1.5">
+          <div className="max-w-[88rem] mx-auto px-3 sm:px-6 py-4 flex flex-wrap items-center gap-1.5">
             <a
               href={ctaUrl("https://app.strix.ai", "logo")}
               target="_blank"
@@ -295,8 +313,10 @@ export default function App() {
               <img src="./logo.png" alt="Strix" className="w-10 h-8 object-cover" />
               <div className="text-base text-white font-medium tracking-tight">Strix</div>
             </a>
-            {run && <LiveIndicator finished={run.finished} />}
-            <div className="ml-auto flex items-center gap-3">
+            {run?.summary.runId && <LiveIndicator finished={run.finished} />}
+            <div className="ml-auto flex w-full min-w-0 max-w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+              {canManageScans && <button onClick={() => userSetView("scans")} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-colors hover:border-[#666] ${view === "scans" ? "border-emerald-500/50 text-emerald-400" : "border-[#333] text-white"}`}>Local scans</button>}
+              {canManageScans && <button onClick={() => userSetView("settings")} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-colors hover:border-[#666] ${view === "settings" ? "border-emerald-500/50 text-emerald-400" : "border-[#333] text-white"}`}>LLM settings</button>}
               {runs && !runs.locked && runs.runs.length > 0 && (
                 <RunSwitcher
                   runs={runs}
@@ -320,7 +340,7 @@ export default function App() {
         </div>
 
         <div className="max-w-[88rem] mx-auto px-3 sm:px-6 py-8 sm:py-12 space-y-6">
-          {error && !run && view !== "history" && view !== "email" && (
+          {error && !run && view !== "history" && view !== "email" && view !== "scans" && view !== "settings" && (
             <div className="rounded-lg px-4 py-3 flex gap-3 items-start border border-red-500/30 bg-red-500/5">
               <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5 text-red-400" aria-hidden="true" />
               <p className="text-sm text-red-300">{error}</p>
@@ -333,7 +353,11 @@ export default function App() {
             key={`${activeRun ?? "launched"}:${view}:${selectedId ?? ""}`}
             className="animate-page-in space-y-6"
           >
-          {view === "email" ? (
+          {view === "settings" && canManageScans ? (
+            <LlmSettingsView />
+          ) : view === "scans" && canManageScans ? (
+            <ScanJobsView onSelectRun={selectRun} />
+          ) : view === "email" ? (
             <EmailReportView
               activeRun={activeRun}
               auth={auth}
@@ -440,21 +464,21 @@ function RunSwitcher({
   const activeEntry = runs.runs.find((r) => r.name === activeRun);
   const current = activeEntry ? runTitle(activeEntry.target, activeEntry.name) : launchedName;
   return (
-    <div className="relative">
+    <div className="relative min-w-0 max-w-full flex-1 sm:flex-none">
       <button
         onClick={() => setOpen((o) => !o)}
         onBlur={() => setTimeout(() => setOpen(false), 150)}
         aria-label="Switch pentest"
-        className="flex items-center gap-2 rounded-lg border border-[#3a3a3a] bg-[rgba(255,255,255,0.05)] px-3 py-2 text-sm text-white transition-colors hover:border-[#555] hover:bg-[rgba(255,255,255,0.09)]"
+        className="flex w-full max-w-full items-center gap-2 rounded-lg border border-[#3a3a3a] bg-[rgba(255,255,255,0.05)] px-3 py-2 text-sm text-white transition-colors hover:border-[#555] hover:bg-[rgba(255,255,255,0.09)] sm:w-auto"
       >
         <History className="h-4 w-4 flex-shrink-0 text-[#888]" aria-hidden="true" />
-        <span className="flex-shrink-0 text-[#888]">Pentest</span>
-        <span className="max-w-[260px] truncate font-medium">{current}</span>
+        <span className="hidden flex-shrink-0 text-[#888] sm:inline">Pentest</span>
+        <span className="min-w-0 max-w-[260px] truncate font-medium">{current}</span>
         <ChevronDown className="h-4 w-4 flex-shrink-0 text-[#aaa]" aria-hidden="true" />
       </button>
       {open && (
         <div
-          className="absolute right-0 z-50 mt-2 max-h-96 w-96 overflow-y-auto rounded-xl py-1.5 shadow-2xl"
+          className="absolute left-0 z-50 mt-2 max-h-96 w-full max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl py-1.5 shadow-2xl sm:left-auto sm:right-0 sm:w-96"
           style={{ border: "1px solid #3a3a3a", background: "#0a0a0a" }}
         >
           <div className="border-b border-[#222] px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[#666]">

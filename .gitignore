@@ -77,6 +77,8 @@ tensorboard/
 # Agent execution traces
 strix_runs/
 agent_runs/
+# Workspace-local dashboard credentials (never include in scan artifacts).
+.strix/
 
 # Misc
 *.log
