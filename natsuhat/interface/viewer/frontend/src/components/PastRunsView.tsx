@@ -1,4 +1,4 @@
-import { ChevronRight, Terminal } from "lucide-react";
+import { ChevronRight, Terminal, Trash2 } from "lucide-react";
 import type { RunListEntry, RunsPayload, RunSeverityCounts } from "@/data/serverSource";
 import { runTitle } from "@/lib/target-utils";
 
@@ -68,12 +68,16 @@ interface PastRunsViewProps {
   runs: RunsPayload | null;
   activeRun: string | null;
   onSelectRun: (name: string) => void;
+  onDeleteRun?: (name: string) => Promise<void>;
+  deleting?: boolean;
 }
 
 export default function PastRunsView({
   runs,
   activeRun,
   onSelectRun,
+  onDeleteRun,
+  deleting,
 }: PastRunsViewProps) {
   if (!runs) {
     return (
@@ -114,15 +118,15 @@ export default function PastRunsView({
         const date = formatTimeAgo(run.start_time) ?? formatTimeAgo(run.end_time);
         const title = runTitle(run.target, run.name);
         return (
-          <button
+          <div
             key={run.name}
-            onClick={() => onSelectRun(run.name)}
-            className={`animate-card-in group flex w-full cursor-pointer items-center gap-4 rounded-lg border px-4 py-3 text-left transition-colors ${
+            className={`animate-card-in group flex w-full items-center gap-2 rounded-lg border pr-3 text-left transition-colors ${
               active
                 ? "border-[#444] bg-[rgba(255,255,255,0.04)]"
                 : "border-[#222] bg-[rgba(255,255,255,0.02)] hover:border-[#444]"
             }`}
           >
+            <button onClick={() => onSelectRun(run.name)} className="flex min-w-0 flex-1 cursor-pointer items-center gap-4 px-4 py-3 text-left" aria-label={`View scan ${title}`}>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="truncate text-sm font-medium text-white">{title}</span>
@@ -142,7 +146,9 @@ export default function PastRunsView({
             </div>
             <SeverityChips counts={run.severity_counts} />
             <ChevronRight className="h-4 w-4 flex-shrink-0 text-[#555] transition-colors group-hover:text-[#aaa]" aria-hidden="true" />
-          </button>
+            </button>
+            {onDeleteRun && <button disabled={deleting || !run.finished} onClick={() => void onDeleteRun(run.name)} aria-label={`Delete scan ${title}`} title={run.finished ? "Delete local scan results" : "Only finished scans can be deleted"} className="cursor-pointer rounded-lg border border-[#333] p-2 text-[#888] transition-colors hover:border-red-500/40 hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 className="h-4 w-4" aria-hidden="true" /></button>}
+          </div>
         );
       })}
     </div>

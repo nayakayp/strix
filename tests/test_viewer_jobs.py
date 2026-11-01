@@ -204,6 +204,97 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
         httpd.server_close()
 
 
+def test_delete_scan_http_contract(tmp_path: Path) -> None:
+    base = tmp_path / "natsuhat_runs"
+    httpd, url, token = serve(base / ".dashboard", manage_scans=True, open_browser=False)
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    confirmed = {"confirmed": True}
+    try:
+        completed = base / "cli-completed"
+        completed.mkdir()
+        (completed / "run.json").write_text(
+            json.dumps({"status": "completed", "end_time": "2026-01-01T12:00:00Z"})
+        )
+        (completed / "vulnerabilities.json").write_text("[]")
+        endpoint = "/api/runs/cli-completed/delete"
+        assert request(url, endpoint, body=confirmed)[0] == 403
+        assert request(url, endpoint, cookie, confirmed, Origin="https://evil.test")[0] == 403
+        assert request(url, endpoint, cookie, {})[0] == 400
+        assert completed.is_dir()
+
+        live = base / "cli-live"
+        live.mkdir()
+        (live / "run.json").write_text('{"status": "running"}')
+        assert request(url, "/api/runs/cli-live/delete", cookie, confirmed)[0] == 409
+        assert live.is_dir()
+
+        for remote in (
+            {"cleanup": "failed"},
+            {"cleanup": "paused", "results_pending": True},
+        ):
+            (completed / "runner.json").write_text(json.dumps(remote))
+            assert request(url, endpoint, cookie, confirmed)[0] == 409
+            assert completed.is_dir()
+        (completed / "runner.json").write_text('{"cleanup": "paused"}')
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "run.json").write_text((completed / "run.json").read_text())
+        (base / "linked").symlink_to(outside, target_is_directory=True)
+        for name in ("..%2Foutside", "linked", ".dashboard", "missing", "cli-completed%2F.."):
+            assert request(url, f"/api/runs/{name}/delete", cookie, confirmed)[0] == 404
+        assert outside.is_dir()
+
+        assert request(url, endpoint, cookie, confirmed) == (200, {"ok": True})
+        assert not completed.exists()
+        names = {run["name"] for run in request(url, "/api/runs", cookie)[1]["runs"]}
+        assert "cli-completed" not in names
+        assert "cli-live" in names
+        assert request(url, "/api/run?run=cli-completed", cookie)[0] == 404
+        assert request(url, endpoint, cookie, confirmed)[0] == 404
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    httpd, url, token = serve(live, open_browser=False)
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    try:
+        assert request(url, "/api/runs/cli-live/delete", cookie, confirmed)[0] == 403
+        assert live.is_dir()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.usefixtures("child_process")
+def test_delete_job_requires_stopped_process(tmp_path: Path) -> None:
+    base = tmp_path / "natsuhat_runs"
+    httpd, url, token = serve(base / ".dashboard", manage_scans=True, open_browser=False)
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    confirmed = {"confirmed": True}
+    try:
+        status, body = request(
+            url, "/api/jobs", cookie, {**REQUEST, "target": "https://hold.example.test"}
+        )
+        assert status == 202
+        name = body["job"]["id"]
+        endpoint = f"/api/runs/{name}/delete"
+        assert request(url, endpoint, cookie, confirmed)[0] == 409
+        assert request(url, f"/api/jobs/{name}/stop", cookie, {})[0] == 200
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if request(url, "/api/jobs", cookie)[1]["jobs"][0]["status"] == "stopped":
+                break
+            time.sleep(0.02)
+        assert request(url, endpoint, cookie, confirmed)[0] == 200
+        assert request(url, "/api/jobs", cookie)[1]["jobs"] == []
+        assert not (base / name).exists()
+        assert request(url, f"/api/jobs/{name}/log", cookie)[0] == 404
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 @pytest.mark.parametrize(
     ("exit_code", "has_report", "status"),
     [(0, True, "completed"), (2, True, "completed"), (1, False, "failed"), (2, False, "failed")],

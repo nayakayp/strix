@@ -1,9 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import {
-  AlertTriangle,
-  Bot,
-  History,
-} from "lucide-react";
+import { Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { McpConnectionStatus } from "@/data/serverSource";
 import type { View } from "@/App";
@@ -27,12 +23,9 @@ const COLLAPSE_KEY = "natsuhat_viewer_sidebar_collapsed";
 interface SidebarProps {
   view: View;
   onSelectView: (view: View) => void;
-  issuesCount: number;
-  agentCount: number;
+  canManageScans: boolean;
   mcpConnections: McpConnectionStatus[];
   mcpInUse: Set<string>;
-  runCount: number;
-  onOpenHistory: () => void;
 }
 
 function readInt(key: string, fallback: number): number {
@@ -48,12 +41,9 @@ function readInt(key: string, fallback: number): number {
 export default function Sidebar({
   view,
   onSelectView,
-  issuesCount,
-  agentCount,
+  canManageScans,
   mcpConnections,
   mcpInUse,
-  runCount,
-  onOpenHistory,
 }: SidebarProps) {
   const [width, setWidth] = useState(() => {
     const w = readInt(WIDTH_KEY, DEFAULT_WIDTH);
@@ -152,40 +142,25 @@ export default function Sidebar({
         </header>
 
         {/* Navigation */}
-        <nav className="relative min-w-[160px] flex-1 overflow-y-auto overflow-x-clip scrollbar-thin pb-10 pt-2">
+        <nav aria-label="Main navigation" className="relative min-w-[160px] flex-1 overflow-y-auto overflow-x-clip scrollbar-thin pb-10 pt-2">
           <div className="relative flex flex-col gap-px px-2">
             <NavItem
               icon={<ProjectsIcon />}
-              label="Pentest Overview"
-              active={view === "overview"}
-              onClick={() => onSelectView("overview")}
+              label="Pentest"
+              active={view !== "settings"}
+              onClick={() => onSelectView("pentest")}
             />
-            <NavItem
-              icon={<AlertTriangle className="h-4 w-4" />}
-              label="Issues"
-              count={issuesCount > 0 ? issuesCount : undefined}
-              active={view === "issues"}
-              onClick={() => onSelectView("issues")}
-            />
-            {agentCount > 0 && (
+            {canManageScans && (
               <NavItem
-                icon={<Bot className="h-4 w-4" />}
-                label="Agents"
-                count={agentCount}
-                active={view === "agents"}
-                onClick={() => onSelectView("agents")}
+                icon={<Settings2 className="h-4 w-4" />}
+                label="LLM settings"
+                active={view === "settings"}
+                onClick={() => onSelectView("settings")}
               />
             )}
             {mcpConnections.length > 0 && (
               <McpConnectionsPanel connections={mcpConnections} inUse={mcpInUse} />
             )}
-            <NavItem
-              icon={<History className="h-4 w-4" />}
-              label="Past runs"
-              count={runCount > 0 ? runCount : undefined}
-              active={view === "history"}
-              onClick={onOpenHistory}
-            />
           </div>
         </nav>
 
@@ -224,6 +199,7 @@ function NavItem({ icon, label, active, onClick, count }: NavItemProps) {
   return (
     <button
       onClick={onClick}
+      aria-current={active ? "page" : undefined}
       className={cn(
         "group flex h-9 w-full origin-left flex-row items-center rounded-md transition-colors",
         active

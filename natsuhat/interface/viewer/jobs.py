@@ -11,6 +11,7 @@ import contextlib
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -29,6 +30,7 @@ from natsuhat.interface.viewer.remote import (
     runners,
     validate_runner,
 )
+from natsuhat.interface.viewer.transcript import read_run_summary
 from natsuhat.report.writer import atomic_write_text
 
 
@@ -344,6 +346,31 @@ class ScanJobManager:
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
+
+    def delete(self, name: str) -> None:
+        """Remove terminal local results, never a retained provider sandbox."""
+        with self._lock:
+            directory = self.base_dir / name
+            if (
+                not name
+                or name.startswith(".")
+                or directory.name != name
+                or directory.is_symlink()
+                or directory.resolve().parent != self.base_dir
+                or not directory.is_dir()
+            ):
+                raise JobError("Unknown scan.", 404)
+            job = self._jobs.get(name)
+            if name in self._processes or (job and job["status"] in ACTIVE_STATUSES):
+                raise JobError("Stop the scan and wait for it to finish before deleting it.", 409)
+            record = read_run_summary(directory)
+            if not job and not record.get("finished"):
+                raise JobError("Only finished scans can be deleted.", 409)
+            remote = self._runner_state(name).get("remote", {})
+            if remote and (remote.get("cleanup") not in RETAINED or remote.get("results_pending")):
+                raise JobError("Retrieve results and finish sandbox cleanup before deleting.", 409)
+            shutil.rmtree(directory)
+            self._jobs.pop(name, None)
 
     def log(self, name: str) -> str:
         with self._lock:

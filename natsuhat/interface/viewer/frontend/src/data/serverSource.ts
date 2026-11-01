@@ -253,6 +253,11 @@ export async function stopJob(id: string): Promise<void> {
   if (!result.ok) throw new Error(String(result.data.error ?? "Could not stop scan."));
 }
 
+export async function deleteRun(name: string): Promise<void> {
+  const result = await postJson(`/api/runs/${encodeURIComponent(name)}/delete`, { confirmed: true });
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not delete scan."));
+}
+
 export async function fetchJobLog(id: string): Promise<string> {
   const data = await getJson(`/api/jobs/${encodeURIComponent(id)}/log`) as { text: string };
   return data.text;

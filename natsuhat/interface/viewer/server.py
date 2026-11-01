@@ -167,7 +167,9 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             try:
-                if path == "/api/jobs" or path.startswith(("/api/jobs/", "/api/llm/")):
+                if path == "/api/jobs" or path.startswith(
+                    ("/api/jobs/", "/api/runs/", "/api/llm/")
+                ):
                     self._handle_job_post(path)
                 elif path == "/api/event":
                     self._handle_event()
@@ -286,6 +288,15 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
 
+        def _read_mutation_body(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= 32768:
+                raise JobError("Request must contain at most 32 KiB of JSON.", 413)
+            parsed_body = json.loads(self.rfile.read(length))
+            if not isinstance(parsed_body, dict):
+                raise JobError("Expected a JSON object.")
+            return cast("dict[str, Any]", parsed_body)
+
         def _handle_job_post(self, path: str) -> None:
             if not self._has_session():
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
@@ -310,13 +321,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 )
                 return
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if not 0 < length <= 32768:
-                    raise JobError("Request must contain at most 32 KiB of JSON.", 413)
-                parsed_body = json.loads(self.rfile.read(length))
-                if not isinstance(parsed_body, dict):
-                    raise JobError("Expected a JSON object.")
-                body = cast("dict[str, Any]", parsed_body)
+                body = self._read_mutation_body()
                 if path == "/api/llm/models":
                     self._send_json(
                         HTTPStatus.OK, {"models": manager.llm_profiles.models(body.get("id"))}
@@ -328,6 +333,11 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                     )
                 elif path == "/api/jobs":
                     self._send_json(HTTPStatus.ACCEPTED, {"job": manager.start(body)})
+                elif path.startswith("/api/runs/") and path.endswith("/delete"):
+                    if body.get("confirmed") is not True:
+                        raise JobError("Confirm deletion of this scan and its local results.")
+                    manager.delete(unquote(path.removeprefix("/api/runs/").removesuffix("/delete")))
+                    self._send_json(HTTPStatus.OK, {"ok": True})
                 elif path.endswith(("/rerun", "/stop")):
                     name, action = path.removeprefix("/api/jobs/").rsplit("/", 1)
                     job = (

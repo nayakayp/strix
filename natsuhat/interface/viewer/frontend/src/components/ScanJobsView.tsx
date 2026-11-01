@@ -1,13 +1,20 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Play, RotateCcw, Square, Terminal } from "lucide-react";
-import { fetchJobs, fetchJobState, fetchJobLog, fetchLlmSettings, rerunJob, startJob, stopJob, type ScanJob, type JobsPayload } from "@/data/serverSource";
+import { Play, Plus, RotateCcw, Square, Terminal, Trash2 } from "lucide-react";
+import { fetchJobs, fetchJobState, fetchJobLog, fetchLlmSettings, rerunJob, startJob, stopJob, type ScanJob, type JobsPayload, type RunsPayload } from "@/data/serverSource";
+import PastRunsView from "@/components/PastRunsView";
 
 const ACTIVE = new Set(["starting", "running", "stopping"]);
 const inputClass = "mt-1 w-full rounded-lg border border-[#333] bg-black px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none disabled:opacity-50";
 const buttonClass = "cursor-pointer rounded-lg border border-[#333] px-3 py-2 text-xs text-[#ccc] transition-colors hover:border-[#666] hover:text-white disabled:cursor-not-allowed disabled:opacity-40";
 
-export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: string) => void }) {
+export default function ScanJobsView({ runs, onSelectRun, onDeleteRun, deleting }: {
+  runs: RunsPayload | null;
+  onSelectRun: (name: string) => void;
+  onDeleteRun: (name: string) => Promise<void>;
+  deleting: boolean;
+}) {
   const [jobs, setJobs] = useState<ScanJob[] | null>(null);
+  const [creating, setCreating] = useState(false);
   const [target, setTarget] = useState("");
   const [mode, setMode] = useState("quick");
   const [budget, setBudget] = useState("10");
@@ -31,6 +38,7 @@ export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: stri
   }
   const active = atCapacity(runner);
   const unlimitedBudget = Number(budget) === -1;
+  const savedRuns = runs && { ...runs, runs: runs.runs.filter(run => !jobs?.some(job => job.id === run.name)) };
 
   useEffect(() => {
     let cancelled = false;
@@ -39,8 +47,10 @@ export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: stri
       try {
         const [state, config] = await Promise.all([fetchJobState(), fetchLlmSettings()]);
         const provider = config.providers.find(p => p.id === config.selected_id);
-        const text = logJob ? await fetchJobLog(logJob) : null;
+        const hasLog = logJob && state.jobs.some(job => job.id === logJob);
+        const text = hasLog ? await fetchJobLog(logJob) : null;
         if (!cancelled) {
+          if (logJob && !hasLog) setLogJob(null);
           setJobs(state.jobs);
           setConfiguration(state);
           setRunner(current => current || state.default_runner);
@@ -67,6 +77,7 @@ export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: stri
       await startJob({ target, runner, scan_mode: mode, max_budget_usd: Number(budget), instruction, authorized });
       setAuthorized(false);
       setJobs(await fetchJobs());
+      setCreating(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not start scan.");
     } finally { setPending(false); }
@@ -99,12 +110,16 @@ export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: stri
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Scans</h1>
-        <p className="mt-1 text-sm text-[#888]">One local scan and up to {configuration?.max_remote_concurrent ?? "…"} concurrent remote scans. Each remote scan gets its own sandbox; results sync to this dashboard.</p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold">Pentest</h1>
+          <p className="mt-1 text-sm text-[#888]">Create scans, review findings, and manage local scan history.</p>
+        </div>
+        <button disabled={pending} className={`${buttonClass} inline-flex items-center gap-2 bg-white !text-black hover:bg-[#ddd]`} aria-expanded={creating} aria-controls="create-scan" onClick={() => { setCreating(!creating); setAuthorized(false); }}><Plus className="h-4 w-4" aria-hidden="true" />{creating ? "Cancel" : "New scan"}</button>
       </div>
-      <form onSubmit={submit} className="space-y-4 rounded-xl border border-[#222] bg-white/[0.02] p-5">
-        <h2 className="text-sm font-semibold">Start a pentest</h2>
+      {creating && <form id="create-scan" onSubmit={submit} className="space-y-4 rounded-xl border border-[#222] bg-white/[0.02] p-5">
+        <h2 className="text-sm font-semibold">New scan</h2>
+        <p className="text-xs text-[#888]">One local scan and up to {configuration?.max_remote_concurrent ?? "…"} concurrent remote scans. Each remote scan gets its own sandbox; results sync here.</p>
         <p className="text-xs leading-relaxed text-[#888]">Uses your selected LLM profile, or server CLI settings. The LLM budget does not cover sandbox compute charges. Only submit targets you are authorized to test.</p>
         {llm && <p className="break-all text-xs text-emerald-400">LLM: {llm}</p>}
         <fieldset disabled={pending || jobs === null} className="space-y-4">
@@ -153,12 +168,12 @@ export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: stri
           </button>
         </fieldset>
         {active && <p role="status" className="text-xs text-amber-400">{runner === "local" ? "A local scan is active. Choose a remote runner or wait for it to finish." : "Remote concurrency limit reached. Stop a scan or wait for a slot."}</p>}
-        {((error && !rerunId) || pollError) && <p role="alert" className="text-sm text-red-400">{pollError || error}</p>}
-      </form>
+      </form>}
+      {((error && !rerunId) || pollError) && <p role="alert" className="text-sm text-red-400">{pollError || error}</p>}
 
       <section aria-label="Scan jobs" className="space-y-3">
-        <h2 className="text-sm font-semibold">Jobs</h2>
-        {jobs === null ? <p role="status" className="text-sm text-[#888]">Loading jobs…</p> : jobs.length === 0 ? <p className="text-sm text-[#888]">No dashboard-launched scans yet. Previous CLI runs are in Past runs.</p> : jobs.map((job) => (
+        <h2 className="text-sm font-semibold">Dashboard scans</h2>
+        {jobs === null ? <p role="status" className="text-sm text-[#888]">Loading scans…</p> : jobs.length === 0 ? <p className="text-sm text-[#888]">No dashboard scans yet. Use New scan to create one.</p> : jobs.map((job) => (
           <div key={job.id} className="rounded-xl border border-[#222] bg-white/[0.02] p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0 flex-1">
@@ -171,11 +186,12 @@ export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: stri
                 {job.remote?.sync_error && <p role="status" className="mt-2 text-xs text-amber-400">{job.remote.sync_error}</p>}
               </div>
               <div className="flex flex-wrap gap-2">
-                {job.has_run && <button className={buttonClass} onClick={() => onSelectRun(job.id)}>View run</button>}
+                {job.has_run && <button className={buttonClass} onClick={() => onSelectRun(job.id)}>View scan</button>}
                 <button className={`${buttonClass} inline-flex items-center gap-1.5`} aria-expanded={logJob === job.id} onClick={() => { setLog(null); setLogJob(logJob === job.id ? null : job.id); }}><Terminal className="h-3.5 w-3.5" aria-hidden="true" />{logJob === job.id ? "Hide log" : "Show log"}</button>
                 {(job.remote?.cleanup === "failed" || job.remote?.results_pending) && !ACTIVE.has(job.status) && <button className={buttonClass} disabled={pending} onClick={() => void stop(job.id)}>{job.remote?.results_pending ? "Retry results" : "Retry cleanup"}</button>}
                 {job.status === "failed" && job.remote?.cleanup !== "failed" && !job.remote?.results_pending && <button className={`${buttonClass} inline-flex items-center gap-1.5`} disabled={pending || atCapacity(job.runner ?? "local")} aria-expanded={rerunId === job.id} aria-controls={`rerun-${job.id}`} onClick={() => { setRerunId(rerunId === job.id ? null : job.id); setRerunAuthorized(false); setError(null); }}><RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />Rerun</button>}
                 {ACTIVE.has(job.status) && <button className={`${buttonClass} inline-flex items-center gap-1.5 !text-red-400`} disabled={pending || job.status === "stopping"} onClick={() => void stop(job.id)}><Square className="h-3 w-3" aria-hidden="true" />{job.status === "stopping" ? "Stopping…" : "Stop scan"}</button>}
+                <button className={`${buttonClass} inline-flex items-center gap-1.5 !text-red-400`} disabled={pending || deleting || ACTIVE.has(job.status) || !!job.remote?.results_pending || (!!job.remote && !["paused", "archived", "deleted", "not_created"].includes(job.remote.cleanup))} onClick={() => void onDeleteRun(job.id)}><Trash2 className="h-3.5 w-3.5" aria-hidden="true" />Delete scan</button>
               </div>
             </div>
             {job.llm_model && <p className="mt-2 break-all text-xs text-[#888]">LLM: {job.llm_model}</p>}
@@ -200,6 +216,10 @@ export default function ScanJobsView({ onSelectRun }: { onSelectRun: (name: stri
           </div>
         ))}
       </section>
+      {jobs !== null && <section aria-label="Saved scans" className="space-y-3">
+        <h2 className="text-sm font-semibold">Saved scans</h2>
+        <PastRunsView runs={savedRuns} activeRun={null} onSelectRun={onSelectRun} onDeleteRun={onDeleteRun} deleting={deleting} />
+      </section>}
     </div>
   );
 }

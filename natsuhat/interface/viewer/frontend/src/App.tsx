@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  ArrowLeft,
-  AlertCircle,
-  Bot,
-  ChevronDown,
-  History,
-} from "lucide-react";
+import { ArrowLeft, AlertCircle, Bot } from "lucide-react";
 import type { Vulnerability, VulnerabilitySeverity } from "@/types/issues";
 import { SEVERITY_COLORS } from "@/types/issues";
 import { getSeverityDot } from "@/lib/vulnerability-utils";
@@ -24,6 +18,7 @@ import {
   fetchRuns,
   fetchTranscript,
   fetchVulnerabilities,
+  deleteRun,
   parseMcpConnectionStatus,
   type LoadedRun,
   type RunsPayload,
@@ -36,7 +31,18 @@ import LlmSettingsView from "@/components/LlmSettingsView";
 import { RunDetails } from "@/components/RunDetails";
 import { TrustToast } from "@/components/TrustToast";
 
-export type View = "overview" | "issues" | "agents" | "history" | "scans" | "settings";
+export type View = "pentest" | "overview" | "issues" | "agents" | "settings";
+
+function readPage(): { view: View; run: string | null } {
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const page = params.get("page");
+  const run = params.get("run");
+  const tab = params.get("tab");
+  return {
+    view: page === "settings" ? "settings" : run ? (tab === "issues" || tab === "agents" ? tab : "overview") : "pentest",
+    run,
+  };
+}
 
 const TRUST_BANNER =
   "Your findings stay on your machine. They're rendered here locally in your browser and never uploaded or stored by Natsuhat.";
@@ -45,12 +51,14 @@ const SEVERITY_ORDER: VulnerabilitySeverity[] = ["critical", "high", "medium", "
 const POLL_MS = 500;
 
 export default function App() {
-  const [activeRun, setActiveRun] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<string | null>(() => readPage().run);
   const [run, setRun] = useState<LoadedRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [view, setView] = useState<View>("overview");
+  const [view, setView] = useState<View>(() => readPage().view);
   const [runs, setRuns] = useState<RunsPayload | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   // Whether this viewer can steer a live scan (true only inside the in-TUI
   // launcher that shares the running scan's coordinator + event loop).
   const [canSteer, setCanSteer] = useState(false);
@@ -88,6 +96,7 @@ export default function App() {
   // does a single full fetch and stops.
   const finishedRef = useRef(false);
   useEffect(() => {
+    if (!activeRun) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     finishedRef.current = false;
@@ -179,75 +188,63 @@ export default function App() {
     return inUse;
   }, [run]);
 
-  // Per-run guard for the default view: land on Agents while a scan is live,
-  // Overview once it finishes. Applied at most once per run and never once the
-  // user has navigated manually (userSetView flips the guard).
-  const initialViewAppliedRef = useRef(false);
-
-  // Reset the guard whenever the active run changes so the newly selected run
-  // gets its own default.
   useEffect(() => {
-    initialViewAppliedRef.current = false;
+    const onNavigate = () => {
+      const page = readPage();
+      setView(page.view);
+      if (activeRun !== page.run) {
+        setRun(null);
+        setError(null);
+      }
+      setActiveRun(page.run);
+      setSelectedId(null);
+    };
+    window.addEventListener("hashchange", onNavigate);
+    return () => window.removeEventListener("hashchange", onNavigate);
   }, [activeRun]);
 
-  useEffect(() => {
-    if (initialViewAppliedRef.current || !run) return;
-    if (run.finished) {
-      initialViewAppliedRef.current = true;
-      setView("overview");
-    } else if (agentCount > 0) {
-      // Live and agents have appeared: default to the agent graph. If it is
-      // live but no agents exist yet, wait (do not apply, do not set the flag).
-      initialViewAppliedRef.current = true;
-      setView("agents");
+  const userSetView = useCallback((v: View, name?: string) => {
+    setSelectedId(null);
+    const params = new URLSearchParams({ page: v === "settings" ? "settings" : "pentest" });
+    if (v !== "pentest" && v !== "settings") {
+      params.set("run", name ?? activeRun ?? "");
+      params.set("tab", v);
     }
-  }, [run, agentCount]);
-
-  // User-initiated navigation: mark the default guard applied so the per-run
-  // default effect never yanks the user off the view they chose.
-  const userSetView = useCallback((v: View) => {
-    initialViewAppliedRef.current = true;
-    setView(v);
-  }, []);
-
-  useEffect(() => {
-    if (canManageScans && runs?.count === 0 && !initialViewAppliedRef.current) {
-      userSetView("scans");
-    }
-  }, [canManageScans, runs, userSetView]);
+    window.location.hash = params.toString();
+  }, [activeRun]);
 
   const selectRun = useCallback((name: string) => {
-    setActiveRun(name);
-    setSelectedId(null);
-    setRun(null);
-    setError(null);
-    // Reset the guard so the per-run default applies to the newly selected run.
-    initialViewAppliedRef.current = false;
-  }, []);
+    const entry = runs?.runs.find(item => item.name === name);
+    userSetView(entry && !entry.finished ? "agents" : "overview", name);
+  }, [runs, userSetView]);
 
-  const openHistory = useCallback(() => {
-    void refreshRuns();
-    userSetView("history");
-  }, [refreshRuns, userSetView]);
+  async function removeRun(name: string) {
+    if (deleting || !window.confirm("Delete this scan and all its local findings, reports, and logs? This cannot be undone. Retained remote sandboxes will not be deleted.")) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteRun(name);
+      await refreshRuns();
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Could not delete scan.");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const isRunView = view !== "pentest" && view !== "settings";
 
   return (
     <div className="min-h-screen bg-black text-white flex">
       <Sidebar
         view={view}
         onSelectView={(v) => {
-          // Clicking a sidebar view always lands on that section's top level,
-          // so leaving a specific issue's detail view and clicking "Issues"
-          // returns to the full findings list.
           setSelectedId(null);
-          if (v === "history") openHistory();
-          else userSetView(v);
+          userSetView(v);
         }}
-        issuesCount={run?.vulnerabilities.length ?? 0}
-        agentCount={agentCount}
-        mcpConnections={mcpConnections}
+        canManageScans={canManageScans}
+        mcpConnections={isRunView ? mcpConnections : []}
         mcpInUse={mcpInUse}
-        runCount={runs?.count ?? 0}
-        onOpenHistory={openHistory}
       />
 
       <div className="flex-1 min-w-0">
@@ -258,24 +255,17 @@ export default function App() {
               <img src="./logo.png" alt="Natsuhat" className="w-10 h-8 object-cover" />
               <div className="text-base text-white font-medium tracking-tight">Natsuhat</div>
             </div>
-            {run?.summary.runId && <LiveIndicator finished={run.finished} />}
-            <div className="ml-auto flex w-full min-w-0 max-w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-              {canManageScans && <button onClick={() => userSetView("scans")} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-colors hover:border-[#666] ${view === "scans" ? "border-emerald-500/50 text-emerald-400" : "border-[#333] text-white"}`}>Scans</button>}
-              {canManageScans && <button onClick={() => userSetView("settings")} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-colors hover:border-[#666] ${view === "settings" ? "border-emerald-500/50 text-emerald-400" : "border-[#333] text-white"}`}>LLM settings</button>}
-              {runs && !runs.locked && runs.runs.length > 0 && (
-                <RunSwitcher
-                  runs={runs}
-                  activeRun={activeRun}
-                  launchedName={runTitle(run?.summary.targets[0] ?? null, run?.summary.runName ?? run?.summary.runId ?? "Current run")}
-                  onSelect={selectRun}
-                />
-              )}
-            </div>
+            <span className="hidden text-sm text-[#888] lg:inline">{view === "settings" ? "LLM settings" : "Pentest"}{isRunView ? " / Scan details" : ""}</span>
+            {isRunView && run?.summary.runId && <LiveIndicator finished={run.finished} />}
+            <nav aria-label="Main navigation" className="ml-auto flex items-center gap-4 lg:hidden">
+              <TabButton active={view !== "settings"} onClick={() => userSetView("pentest")}>Pentest</TabButton>
+              {canManageScans && <TabButton active={view === "settings"} onClick={() => userSetView("settings")}>LLM settings</TabButton>}
+            </nav>
           </div>
         </div>
 
         <div className="max-w-[88rem] mx-auto px-3 sm:px-6 py-8 sm:py-12 space-y-6">
-          {error && !run && view !== "history" && view !== "scans" && view !== "settings" && (
+          {error && !run && isRunView && (
             <div className="rounded-lg px-4 py-3 flex gap-3 items-start border border-red-500/30 bg-red-500/5">
               <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5 text-red-400" aria-hidden="true" />
               <p className="text-sm text-red-300">{error}</p>
@@ -288,21 +278,20 @@ export default function App() {
             key={`${activeRun ?? "launched"}:${view}:${selectedId ?? ""}`}
             className="animate-page-in space-y-6"
           >
-          {view === "settings" && canManageScans ? (
-            <LlmSettingsView />
-          ) : view === "scans" && canManageScans ? (
-            <ScanJobsView onSelectRun={selectRun} />
-          ) : view === "history" ? (
+          {view === "settings" ? (
+            canManageScans ? <LlmSettingsView /> : <p className="text-sm text-[#888]">LLM settings require an authorized scan-management session.</p>
+          ) : view === "pentest" ? (
             <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <History className="w-5 h-5 text-[#888]" aria-hidden="true" />
-                <h1 className="text-2xl font-semibold text-white">Past runs</h1>
-              </div>
-              <PastRunsView
-                runs={runs}
-                activeRun={activeRun}
-                onSelectRun={selectRun}
-              />
+              {deleteError && <p role="alert" className="text-sm text-red-400">{deleteError}</p>}
+              {canManageScans ? (
+                <ScanJobsView runs={runs} onSelectRun={selectRun} onDeleteRun={removeRun} deleting={deleting} />
+              ) : (
+                <>
+                  <h1 className="text-2xl font-semibold">Pentest</h1>
+                  <p className="text-sm text-[#888]">Browse local scans and their findings.</p>
+                  <PastRunsView runs={runs} activeRun={activeRun} onSelectRun={selectRun} />
+                </>
+              )}
             </div>
           ) : !run && !error ? (
             <div className="rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-10 text-center">
@@ -311,17 +300,19 @@ export default function App() {
             </div>
           ) : run && counts ? (
             <>
+              <button onClick={() => userSetView("pentest")} className="cursor-pointer inline-flex items-center gap-1.5 text-sm text-[#888] hover:text-white transition-colors">
+                <ArrowLeft className="h-4 w-4" aria-hidden="true" />All scans
+              </button>
               <SummaryHeader summary={run.summary} />
 
-              {/* Tab strip: shown on small screens where the sidebar is hidden. */}
-              <div className="flex gap-5 border-b border-[#2a2a2a] lg:hidden">
+              <div className="flex gap-5 border-b border-[#2a2a2a]" role="navigation" aria-label="Scan details">
                 <TabButton active={view === "overview"} onClick={() => userSetView("overview")}>
-                  Pentest Overview
+                  Overview
                 </TabButton>
                 <TabButton active={view === "issues"} onClick={() => userSetView("issues")}>
                   Issues{run.vulnerabilities.length > 0 ? ` (${run.vulnerabilities.length})` : ""}
                 </TabButton>
-                {agentCount > 0 && (
+                {(!run.finished || agentCount > 0) && (
                   <TabButton active={view === "agents"} onClick={() => userSetView("agents")}>
                     Agents ({agentCount})
                   </TabButton>
@@ -336,7 +327,7 @@ export default function App() {
                   reportMarkdown={run.reportMarkdown}
                   raw={run.raw}
                 />
-              ) : view === "agents" && agentCount > 0 ? (
+              ) : view === "agents" ? (
                 <AgentsTab run={run} canSteer={canSteer} />
               ) : selected ? (
                 <div className="space-y-4">
@@ -361,65 +352,6 @@ export default function App() {
         </div>
       </div>
       <TrustToast message={TRUST_BANNER} />
-    </div>
-  );
-}
-
-function RunSwitcher({
-  runs,
-  activeRun,
-  launchedName,
-  onSelect,
-}: {
-  runs: RunsPayload;
-  activeRun: string | null;
-  launchedName: string;
-  onSelect: (name: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const activeEntry = runs.runs.find((r) => r.name === activeRun);
-  const current = activeEntry ? runTitle(activeEntry.target, activeEntry.name) : launchedName;
-  return (
-    <div className="relative min-w-0 max-w-full flex-1 sm:flex-none">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
-        aria-label="Switch pentest"
-        className="flex w-full max-w-full items-center gap-2 rounded-lg border border-[#3a3a3a] bg-[rgba(255,255,255,0.05)] px-3 py-2 text-sm text-white transition-colors hover:border-[#555] hover:bg-[rgba(255,255,255,0.09)] sm:w-auto"
-      >
-        <History className="h-4 w-4 flex-shrink-0 text-[#888]" aria-hidden="true" />
-        <span className="hidden flex-shrink-0 text-[#888] sm:inline">Pentest</span>
-        <span className="min-w-0 max-w-[260px] truncate font-medium">{current}</span>
-        <ChevronDown className="h-4 w-4 flex-shrink-0 text-[#aaa]" aria-hidden="true" />
-      </button>
-      {open && (
-        <div
-          className="absolute left-0 z-50 mt-2 max-h-96 w-full max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl py-1.5 shadow-2xl sm:left-auto sm:right-0 sm:w-96"
-          style={{ border: "1px solid #3a3a3a", background: "#0a0a0a" }}
-        >
-          <div className="border-b border-[#222] px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[#666]">
-            Switch pentest
-          </div>
-          {runs.runs.map((r) => {
-            const active = r.name === activeRun;
-            return (
-              <button
-                key={r.name}
-                onMouseDown={() => onSelect(r.name)}
-                className={`flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm transition-colors hover:bg-[rgba(255,255,255,0.06)] ${
-                  active ? "bg-[rgba(255,255,255,0.04)] text-white" : "text-[#aaa]"
-                }`}
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{runTitle(r.target, r.name)}</span>
-                  {r.target && <span className="block truncate font-mono text-xs text-[#666]">{r.target}</span>}
-                </span>
-                {active && <span className="h-2 w-2 flex-shrink-0 rounded-full bg-emerald-400" />}
-              </button>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }
