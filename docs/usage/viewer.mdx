@@ -32,7 +32,7 @@ The UI ships prebuilt with Natsuhat, so there is no extra install and no JavaScr
 </ParamField>
 
 <ParamField path="--manage-scans" type="boolean">
-  Enable starting and stopping local scans from the authorized dashboard. Off by default.
+  Enable starting and stopping local or remote scans from the authorized dashboard. Off by default.
 </ParamField>
 
 ## What Is In The Dashboard
@@ -42,16 +42,16 @@ The UI ships prebuilt with Natsuhat, so there is no extra install and no JavaScr
 - **Agent graph** — a live map of the multi-agent team, and what each agent is doing.
 - **Steering** — send instructions to a live scan to redirect the agents during the run. Steering works only in the dashboard the running scan opens. A standalone `natsuhat view` has no live scan to steer.
 - **History** — browse runs alongside the opened run in the same `natsuhat_runs/` directory. The private viewer link authorizes access; email verification is not required.
-- **Local scans** — start a headless scan, inspect its status and log, stop it, and open its results. Available only with `--manage-scans`.
+- **Scans** — choose Local Docker, E2B, or Daytona; start a headless scan, inspect its status and log, stop it, and open its results. Available only with `--manage-scans`.
 - **Reports** — read the report saved locally with each run.
 
-## Managing Local Scans
+## Managing Scans
 
 ```bash
 uv run --frozen natsuhat view --manage-scans --port 8080 --no-open
 ```
 
-Open the private URL printed by the command, then choose **Local scans**. This
+Open the private URL printed by the command, then choose **Scans**. This
 works before the first run exists. Management currently requires Linux or macOS
 and a Python installation (uv/pip), not the standalone bundled executable.
 
@@ -66,37 +66,138 @@ authorization. Set a positive amount for a spending cap, or **`-1` for unlimited
 LLM spending**. Zero, other negative values, and non-finite values are rejected.
 Unlimited jobs are shown as **Unlimited LLM budget**; their workers omit the
 CLI's `--max-budget` flag, using the engine's existing uncapped behavior.
-In-flight model calls can overshoot a finite budget. One
-dashboard-launched scan may run at a time; additional starts return `409` rather
-than queueing. Independently launched CLI scans are not managed or counted.
+In-flight model calls can overshoot a finite budget. One local scan and up to
+ten remote scans may run concurrently by default. Additional starts for a full runner
+pool return `409` rather than queueing. Independently launched CLI scans are not
+managed or counted.
 
 Only **failed** jobs show **Rerun**. Confirm authorization again to create a new
-job with the same target, mode, budget (including `-1`), and saved instructions.
+job with the same target, runner, mode, budget (including `-1`), and saved instructions.
 The rerun uses the currently selected LLM settings and leaves the original job,
 logs, and results unchanged. This starts over; it does not resume a scan. Reruns
-are disabled while another scan is active. Completed, stopped, and interrupted
-jobs cannot be rerun through this action.
+are disabled when that runner pool is full or remote cleanup is unconfirmed.
+Completed, stopped, and interrupted jobs cannot be rerun through this action.
+
+If result transfer fails, **Retry results** retrieves files from the retained
+sandbox without launching another scan. It briefly resumes provider compute,
+then pauses or archives the sandbox again; provider charges may apply. Recovery
+is explicit, survives dashboard restarts, and blocks **Rerun** until results and
+retention are confirmed. A partial recovered run is marked interrupted rather
+than left running. Findings withdrawn on the worker are removed from subsequent
+dashboard snapshots; controller job metadata is preserved.
 
 Jobs and their logs are persisted in `natsuhat_runs/<job-id>/job.json` and `job.log`,
 alongside normal run artifacts. Logs may contain sensitive scan output. The UI
-shows the last 32 KiB of the log; the full log remains on disk.
+shows the last 32 KiB of each controller and remote log; the full controller log
+remains on disk.
 
 Closing the browser does not stop the scan. Stopping the viewer stops its active
-child with SIGTERM, allowing normal CLI cleanup. After 30 seconds a stuck child
-is force-killed; inspect Docker for leftover scan containers if that occurs.
+children with SIGTERM, allowing normal CLI cleanup. After 30 seconds a stuck local
+child is force-killed; inspect Docker for leftover scan containers if that occurs.
+Remote workers get up to eighteen minutes for final synchronization and VM pause/archive.
 Completed job history survives viewer restarts. After an unexpected viewer exit,
 an inherited owner lock prevents another manager from starting until its old
 worker exits; stale active records are then marked interrupted. There is no
 automatic restart, adoption of saved PIDs, or scan resumption.
 
+### E2B And Daytona Runners
+
+Set `E2B_API_KEY` and/or `DAYTONA_API_KEY` on the dashboard server, using a secret
+manager rather than a committed file. E2B is the default for new scans when its
+key is configured; otherwise Local Docker is the default. Daytona stays available
+as an explicit choice. Create a reusable runner image once:
+
+```bash
+uv run --frozen python scripts/runner_images.py e2b
+uv run --frozen python scripts/runner_images.py daytona
+```
+
+These commands create persistent, potentially billable templates/snapshots, run
+a nested-Docker smoke test, and retain its VM paused (E2B) or archived (Daytona). They refuse
+to replace an existing name. The image source is `containers/runner/`. The builder
+installs the exact application and frozen Python dependencies and builds the
+Kali tool image **once**, before saving the template/snapshot. This one-time
+build may take tens of minutes. E2B captures Docker already running; Daytona
+snapshots a prepared, stopped VM and starts Docker when a new VM boots.
+
+Image names default to `natsuhat-ready-<content revision>`, derived from the
+application, lockfile, and image build inputs, not Git or archive timestamps.
+Rebuild after changing those inputs. `--base natsuhat-runner-v1` reuses an
+existing minimal host image. `--name` overrides the generated name;
+`NATSUHAT_E2B_TEMPLATE` and `NATSUHAT_DAYTONA_SNAPSHOT` select custom names.
+
+Every submitted remote scan gets a separate VM with its application, dependencies,
+and tools already installed. The controller checks the image revision and local
+Docker image, sends only the job, optional instructions and LLM connection, and
+launches the installed Python directly. There is **no per-scan source upload,
+dependency installation, image pull, or tool build**. Missing, stale, or incomplete
+images fail clearly before receiving model credentials; there is no cold-build fallback.
+Local server source directories, Git history, other runs, and E2B/Daytona credentials
+are not uploaded. Remote targets must be reachable URLs, domains, IPs, or HTTPS
+repositories, not local paths or credential-bearing URLs. A remote `localhost`
+refers to that new VM, not the dashboard server.
+
+The selected LLM connection, including its API key, is sent to the worker.
+Results and consistent SQLite transcript snapshots are pulled about every five
+seconds while scanning; no public callback or inbound worker port is required.
+The dashboard must remain running. Final reports remain in the controller's
+`natsuhat_runs/<job-id>/` as well as in the retained sandbox. Remote live steering
+and restarting an interrupted scan after a controller restart are not supported.
+Result snapshots are limited to 256 MiB.
+
+The LLM budget does **not** include provider compute charges. The total remote
+time limit defaults to 14,400 seconds (four hours), including provisioning and paused
+time; change it with
+`NATSUHAT_REMOTE_TIMEOUT_SECONDS` (300–86,400). Change the shared remote pool with
+`NATSUHAT_REMOTE_MAX_CONCURRENT` (1–16, default 10).
+
+E2B sessions run for at most 3,600 seconds before **pausing**, preserving memory,
+processes, and files. While a scan is active, the controller reconnects to the
+same VM and continues polling its existing process; it does not launch the scan
+again or reset the LLM budget or overall deadline. Provider resume failures are
+retried within the existing connection retry limit. Network connections may
+need to reconnect after a pause; preserving memory is not a guarantee that an
+in-flight model or tool request survives unchanged.
+If E2B falls back to a filesystem-only snapshot under snapshot pressure, the
+controller detects the reboot and fails the scan without replaying it. Its files
+and existing results remain retained; process-memory recovery is not possible.
+
+Completion, cancellation, and failures retain E2B sandboxes **paused** and
+Daytona sandboxes **stopped and archived**, without deleting their data.
+Traffic-triggered E2B auto-resume is disabled, so an old URL cannot restart compute.
+Paused E2B resources are not automatically resumed when the dashboard restarts.
+Daytona auto-delete and TTL are disabled; if the controller disappears, an idle
+sandbox stops after five minutes and archives after one stopped minute. E2B
+pauses at its session timeout. Retained sandboxes and credentials in their memory
+remain subject to your provider account's access controls and retention policies.
+Daytona's archived container sandboxes are not billed; stopped ones still incur
+disk charges. Check current provider pricing for paused storage and retained images.
+Unconfirmed pause/archive
+shows **Retry cleanup** and blocks rerunning that job. After a controller
+restart, unresolved remote resources are paused/archived without restarting scans.
+Verify the provider console if cleanup remains unconfirmed. Archiving is
+asynchronous and may take several minutes; only a confirmed archived state is
+reported as successful retention.
+
+Daytona must permit outbound access to package repositories during image preparation,
+and to the selected model endpoint and scan targets during scans. Its restricted
+organization tiers block arbitrary destinations; sandbox allow lists cannot
+override that organization policy. Preinstalling tools does not remove the model
+and target connectivity requirements.
+See [Daytona network limits](https://www.daytona.io/docs/en/network-limits/).
+Retained Daytona sandboxes also require a snapshot whose disk size fits the
+account's **non-ephemeral** sandbox quota. Some accounts permit a 20 GB ephemeral
+sandbox but only a 10 GB retained sandbox. The runner will not fall back to
+ephemeral mode because stopping it would delete the data.
+
 The session-protected JSON endpoints are:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/jobs` | List jobs, status, exit code, and result availability |
-| POST | `/api/jobs` | Start with `target`, `scan_mode`, `max_budget_usd`, `authorized: true`, and optional `instruction` |
+| GET | `/api/jobs` | List jobs, runner availability/default, concurrency limits, remote phase/cleanup/resume count, and result availability |
+| POST | `/api/jobs` | Start with `target`, `scan_mode`, `max_budget_usd`, `authorized: true`, optional `runner` (`local`, `e2b`, `daytona`; defaults to E2B when configured, otherwise local), and optional `instruction` |
 | POST | `/api/jobs/<id>/rerun` | Start a new job from a failed job with `authorized: true`; other statuses return `409` |
-| POST | `/api/jobs/<id>/stop` | Stop a job (safe to repeat) |
+| POST | `/api/jobs/<id>/stop` | Stop a job, recover pending results, or retry failed remote cleanup (safe to repeat; result recovery can resume compute) |
 | GET | `/api/jobs/<id>/log` | Read the log tail |
 
 Mutations require `Content-Type: application/json` and the viewer session cookie;

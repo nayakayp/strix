@@ -30,6 +30,7 @@ REQUEST = {
     "scan_mode": "standard",
     "max_budget_usd": 3.75,
     "authorized": True,
+    "runner": "local",
 }
 
 # Only the scan process is replaced. HTTP auth, persistence, process waiting,
@@ -39,6 +40,13 @@ import json, os, signal, sys, time
 from pathlib import Path
 directory = Path(sys.argv[1])
 job = json.loads((directory / 'job.json').read_text())
+if '--cleanup' in sys.argv[2:]:
+    state = {
+        'cleanup': 'paused' if job['runner'] == 'e2b' else 'archived',
+        'phase': 'Cleanup finished',
+    }
+    (directory / 'runner.json').write_text(json.dumps(state))
+    sys.exit(130)
 print('Synthetic child: ' + job['target'], flush=True)
 if 'NATSUHAT_DASHBOARD_LLM' in os.environ:
     snapshot = json.loads(os.environ['NATSUHAT_DASHBOARD_LLM'])
@@ -55,6 +63,13 @@ if 'hold' in job['target']:
         time.sleep(0.02)
 time.sleep(0.1)
 code = int(job['target'].rsplit('/', 1)[-1])
+if '/cleanup-pending/' in job['target']:
+    (directory / 'runner.json').write_text(json.dumps({'cleanup': 'pending', 'phase': 'Scanning'}))
+if '/results-pending/' in job['target']:
+    (directory / 'runner.json').write_text(json.dumps({
+        'cleanup': 'paused' if job['runner'] == 'e2b' else 'archived',
+        'phase': 'Failed', 'results_pending': True,
+    }))
 if '/exit/' in job['target']:
     record = {'run_name': job['id'], 'status': 'completed', 'end_time': '2026-01-01T12:00:00Z'}
     (directory / 'run.json').write_text(json.dumps(record))
@@ -74,7 +89,8 @@ def child_process(monkeypatch: pytest.MonkeyPatch) -> None:
     popen = subprocess.Popen
 
     def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
-        return popen([sys.executable, "-u", "-c", CHILD, command[-1]], **kwargs)
+        args = command[-2:] if command[-1] == "--cleanup" else command[-1:]
+        return popen([sys.executable, "-u", "-c", CHILD, *args], **kwargs)
 
     monkeypatch.setattr(jobs.subprocess, "Popen", launch)
 
@@ -223,11 +239,14 @@ def test_job_exit_history_and_logs(
         restored.close()
 
 
+@pytest.mark.parametrize("runner", ["local", "e2b"])
 @pytest.mark.parametrize("budget", [3.75, -1])
 @pytest.mark.usefixtures("child_process")
 def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
-    tmp_path: Path, budget: float
+    tmp_path: Path, budget: float, runner: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("E2B_API_KEY", "synthetic-test-key")
+    monkeypatch.setenv("NATSUHAT_REMOTE_MAX_CONCURRENT", "1")
     base = tmp_path / "natsuhat_runs"
     instruction = "Test object ownership.\nDo not test payments."
     manager = jobs.ScanJobManager(base)
@@ -238,9 +257,12 @@ def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
                 "target": "https://authorized.example.test/usage/1",
                 "max_budget_usd": budget,
                 "instruction": instruction,
+                "runner": runner,
             }
         )
         assert settled(manager, original["id"])["status"] == "failed"
+        if runner != "local":
+            (base / original["id"] / "runner.json").write_text('{"cleanup": "deleted"}')
     finally:
         manager.close()
     original_files = {p.name: p.read_bytes() for p in (base / original["id"]).iterdir()}
@@ -256,7 +278,9 @@ def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
         )
         assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["id"] == original["id"]
         assert httpd.job_manager is not None
-        held = httpd.job_manager.start({**REQUEST, "target": "https://hold.example.test"})
+        held = httpd.job_manager.start(
+            {**REQUEST, "target": "https://hold.example.test", "runner": runner}
+        )
         assert request(url, path, cookie, {"authorized": True})[0] == 409
         httpd.job_manager.stop(held["id"])
         assert settled(httpd.job_manager, held["id"])["status"] == "stopped"
@@ -272,6 +296,7 @@ def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
         assert rerun["target"] == "https://authorized.example.test/usage/1"
         assert rerun["scan_mode"] == "standard"
         assert rerun["max_budget_usd"] == budget
+        assert rerun["runner"] == runner
         assert (base / rerun["id"] / "instructions.txt").read_text() == instruction
         assert settled(httpd.job_manager, rerun["id"])["status"] == "failed"
         assert {p.name: p.read_bytes() for p in (base / original["id"]).iterdir()} == original_files
@@ -279,6 +304,152 @@ def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+@pytest.mark.usefixtures("child_process")
+def test_remote_http_guards_and_independent_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("E2B_API_KEY", "synthetic-e2b-key")
+    monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
+    monkeypatch.setenv("NATSUHAT_REMOTE_MAX_CONCURRENT", "2")
+    httpd, url, token = serve(
+        tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
+    )
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    try:
+        config = request(url, "/api/jobs", cookie)[1]
+        assert config["default_runner"] == "e2b"
+        assert config["max_remote_concurrent"] == 2
+        assert config["max_concurrent"] == 3
+        assert {r["id"]: r["configured"] for r in config["runners"]} == {
+            "local": True,
+            "e2b": True,
+            "daytona": False,
+        }
+        for invalid in (
+            {"runner": "daytona"},
+            {"runner": "unknown"},
+            {"runner": []},
+            {"runner": "e2b", "target": "/server/private"},
+            {"runner": "e2b", "target": "./source"},
+            {"runner": "e2b", "target": "https://user:secret@host.test"},
+            {"runner": "e2b", "target": "file:///etc/passwd"},
+            {"runner": "e2b", "target": "https://[invalid"},
+        ):
+            assert request(url, "/api/jobs", cookie, {**REQUEST, **invalid})[0] == 400
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            replies = list(
+                pool.map(
+                    lambda _: request(
+                        url,
+                        "/api/jobs",
+                        cookie,
+                        {
+                            **REQUEST,
+                            "runner": "e2b",
+                            "target": "https://hold.example.test",
+                        },
+                    ),
+                    range(3),
+                )
+            )
+        assert sorted(code for code, _ in replies) == [202, 202, 409]
+        remote_ids = {body["job"]["id"] for code, body in replies if code == 202}
+        assert len(remote_ids) == 2
+        code, body = request(
+            url,
+            "/api/jobs",
+            cookie,
+            {
+                **REQUEST,
+                "target": "https://hold.example.test",
+            },
+        )
+        assert code == 202 and body["job"]["runner"] == "local"
+        assert request(url, "/api/jobs", cookie, REQUEST)[0] == 409
+        assert httpd.job_manager is not None
+        for name in remote_ids:
+            request(url, f"/api/jobs/{name}/stop", cookie, {})
+            assert settled(httpd.job_manager, name)["status"] == "stopped"
+        assert (
+            next(j for j in httpd.job_manager.list() if j["id"] == body["job"]["id"])["status"]
+            == "running"
+        )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.parametrize("runner,retained", [("e2b", "paused"), ("daytona", "archived")])
+@pytest.mark.parametrize("pending", ["cleanup", "results"])
+@pytest.mark.usefixtures("child_process")
+def test_unconfirmed_remote_cleanup_can_be_retried_without_rerunning_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str, retained: str, pending: str
+) -> None:
+    monkeypatch.setenv(f"{runner.upper()}_API_KEY", "synthetic-test-key")
+    base = tmp_path / "natsuhat_runs"
+    httpd, url, token = serve(base / ".dashboard", manage_scans=True, open_browser=False)
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    try:
+        code, body = request(
+            url,
+            "/api/jobs",
+            cookie,
+            {
+                **REQUEST,
+                "runner": runner,
+                "target": f"https://authorized.test/exit/{pending}-pending/2",
+            },
+        )
+        assert code == 202
+        name = body["job"]["id"]
+        assert httpd.job_manager is not None
+        result = settled(httpd.job_manager, name)
+        assert result["status"] == "failed"
+        assert result["remote"]["cleanup"] == ("failed" if pending == "cleanup" else retained)
+        if pending == "results":
+            assert result["remote"]["results_pending"]
+        assert request(url, f"/api/jobs/{name}/rerun", cookie, {"authorized": True})[0] == 409
+        assert request(url, f"/api/jobs/{name}/stop", cookie, {})[0] == 200
+        result = settled(httpd.job_manager, name)
+        assert result["status"] == "completed"
+        assert result["remote"]["cleanup"] == retained
+        assert result["error"] is None
+        assert len(request(url, "/api/jobs", cookie)[1]["jobs"]) == 1
+        assert request(url, f"/api/run?run={name}", cookie)[1]["finished"] is True
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    restored = jobs.ScanJobManager(base)
+    try:
+        assert restored.list()[0]["status"] == "completed"
+        assert restored.list()[0]["remote"]["cleanup"] == retained
+        assert restored.log(name).count("Synthetic child:") == 1
+    finally:
+        restored.close()
+
+
+@pytest.mark.parametrize("configured,expected", [(False, "local"), (True, "e2b")])
+@pytest.mark.usefixtures("child_process")
+def test_default_runner_for_new_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool, expected: str
+) -> None:
+    monkeypatch.delenv("NATSUHAT_REMOTE_MAX_CONCURRENT", raising=False)
+    if configured:
+        monkeypatch.setenv("E2B_API_KEY", "synthetic-test-key")
+    else:
+        monkeypatch.delenv("E2B_API_KEY", raising=False)
+    manager = jobs.ScanJobManager(tmp_path / "natsuhat_runs")
+    try:
+        body = {key: value for key, value in REQUEST.items() if key != "runner"}
+        job = manager.start({**body, "target": "https://authorized.test/exit/2"})
+        assert manager.configuration()["default_runner"] == expected
+        assert manager.configuration()["max_remote_concurrent"] == 10
+        assert job["runner"] == expected
+        assert settled(manager, job["id"])["status"] == "completed"
+    finally:
+        manager.close()
 
 
 @pytest.mark.usefixtures("child_process")

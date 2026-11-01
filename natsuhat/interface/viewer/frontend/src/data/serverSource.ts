@@ -217,6 +217,20 @@ export interface ScanJob {
   error: string | null;
   has_run: boolean;
   llm_model?: string | null;
+  runner?: "local" | "e2b" | "daytona";
+  remote?: { phase: string; sandbox_id?: string; cleanup: string; last_sync?: string; sync_error?: string | null; resume_count?: number; results_pending?: boolean };
+}
+
+export interface JobsPayload {
+  jobs: ScanJob[];
+  runners: { id: string; name: string; configured: boolean }[];
+  default_runner: "local" | "e2b";
+  max_remote_concurrent: number;
+  remote_timeout_seconds: number;
+}
+
+export async function fetchJobState(): Promise<JobsPayload> {
+  return await getJson("/api/jobs") as JobsPayload;
 }
 
 export async function fetchJobs(): Promise<ScanJob[]> {

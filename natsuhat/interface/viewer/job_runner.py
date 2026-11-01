@@ -13,10 +13,18 @@ from natsuhat.interface.main import main
 
 def run_job(run_dir: Path) -> None:
     """Reuse CLI setup, sandbox lifecycle, and exit semantics with a reserved ID."""
+    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
+    if job.get("runner", "local") != "local":
+        from natsuhat.interface.viewer.remote import RemoteRun  # noqa: PLC0415
+
+        raise SystemExit(RemoteRun(run_dir).run(cleanup_only="--cleanup" in sys.argv[2:]))
+    if connection_path := os.environ.pop("NATSUHAT_DASHBOARD_LLM_PATH", None):
+        connection = Path(connection_path)
+        os.environ["NATSUHAT_DASHBOARD_LLM"] = connection.read_text(encoding="utf-8")
+        connection.unlink()
     if snapshot := os.environ.pop("NATSUHAT_DASHBOARD_LLM", None):
         settings = load_settings()
         settings.llm = settings.llm.model_copy(update=json.loads(snapshot))
-    job = json.loads((run_dir / "job.json").read_text(encoding="utf-8"))
     sys.argv = [
         "natsuhat",
         "-n",

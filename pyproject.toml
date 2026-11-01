@@ -52,6 +52,8 @@ dependencies = [
   # the Intel macOS (macos-x86_64) release build's `uv sync --frozen`.
   "cryptography>=48.0.1,<49",
   "pyyaml>=6.0",
+  "e2b==2.61.0",
+  "daytona==0.226.1",
 ]
 
 [project.scripts]
@@ -101,6 +103,20 @@ exclude = [
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "scripts/tui_sidecar_hook.py"
+
+[tool.hatch.build.targets.wheel.force-include]
+# Remote workers stage the installed application with these locked build inputs.
+"pyproject.toml" = "natsuhat/_runner/pyproject.toml"
+"uv.lock" = "natsuhat/_runner/uv.lock"
+"README.md" = "natsuhat/_runner/README.md"
+"LICENSE" = "natsuhat/_runner/LICENSE"
+"scripts/tui_sidecar_hook.py" = "natsuhat/_runner/scripts/tui_sidecar_hook.py"
+"scripts/docker.sh" = "natsuhat/_runner/scripts/docker.sh"
+"containers/Dockerfile" = "natsuhat/_runner/containers/Dockerfile"
+"containers/docker-entrypoint.sh" = "natsuhat/_runner/containers/docker-entrypoint.sh"
+"containers/runner/Dockerfile" = "natsuhat/_runner/containers/runner/Dockerfile"
+"containers/runner/start.sh" = "natsuhat/_runner/containers/runner/start.sh"
+"containers/runner/prepare.sh" = "natsuhat/_runner/containers/runner/prepare.sh"
 
 # ============================================================================
 # Type Checking Configuration

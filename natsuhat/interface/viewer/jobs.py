@@ -1,4 +1,4 @@
-"""Single-host scan jobs owned by an explicitly enabled local viewer.
+"""Scan jobs owned by an explicitly enabled dashboard.
 
 Each child runs the normal headless CLI in a separate process. Job metadata and
 logs live with the run; shutdown stops children rather than leaving scans behind.
@@ -15,11 +15,20 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from natsuhat.interface.viewer.llm_settings import JobError, LlmProfiles
+from natsuhat.interface.viewer.remote import (
+    RETAINED,
+    default_runner,
+    remote_limit,
+    remote_timeout,
+    runners,
+    validate_runner,
+)
 from natsuhat.report.writer import atomic_write_text
 
 
@@ -37,7 +46,7 @@ def _now() -> str:
 
 
 class ScanJobManager:
-    """Run at most one scan at a time, retaining job state across viewer restarts."""
+    """One local scan and bounded, independently isolated remote scans."""
 
     def __init__(self, base_dir: Path) -> None:
         if os.name != "posix":
@@ -77,6 +86,10 @@ class ScanJobManager:
                     status="interrupted", end_time=_now(), error="Viewer exited unexpectedly."
                 )
                 self._save(job)
+        for job in self._jobs.values():
+            remote = self._runner_state(job["id"]).get("remote", {})
+            if job.get("runner", "local") != "local" and remote.get("cleanup") not in RETAINED:
+                self._launch(job, cleanup=True)
 
     def _save(self, job: dict[str, Any]) -> None:
         run_dir = self.base_dir / job["id"]
@@ -103,9 +116,26 @@ class ScanJobManager:
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
             return [
-                {**job, "has_run": (self.base_dir / job["id"] / "run.json").is_file()}
+                {
+                    **job,
+                    "has_run": (self.base_dir / job["id"] / "run.json").is_file(),
+                    **self._runner_state(job["id"]),
+                }
                 for job in sorted(self._jobs.values(), key=lambda j: j["start_time"], reverse=True)
             ]
+
+    def _runner_state(self, name: str) -> dict[str, Any]:
+        path = self.base_dir / name / "runner.json"
+        return {"remote": json.loads(path.read_text())} if path.exists() else {}
+
+    def configuration(self) -> dict[str, Any]:
+        return {
+            "runners": runners(),
+            "default_runner": default_runner(),
+            "max_concurrent": 1 + remote_limit(),
+            "max_remote_concurrent": remote_limit(),
+            "remote_timeout_seconds": remote_timeout(),
+        }
 
     def start(self, body: dict[str, Any]) -> dict[str, Any]:
         target = body.get("target")
@@ -130,16 +160,24 @@ class ScanJobManager:
         instruction = body.get("instruction", "")
         if not isinstance(instruction, str) or len(instruction) > 16000:
             raise JobError("Instructions must be text, at most 16,000 characters.")
+        runner = validate_runner(body.get("runner", default_runner()), target)
         with self._lock:
             if self._closed:
                 raise JobError("The scan manager is shutting down.", 503)
-            if self._processes:
-                raise JobError("A scan is already active. Stop it or wait for it to finish.", 409)
+            active = [self._jobs[name].get("runner", "local") for name in self._processes]
+            if runner == "local" and "local" in active:
+                raise JobError(
+                    "A local scan is already active. Stop it or wait for it to finish.", 409
+                )
+            if runner != "local" and sum(item != "local" for item in active) >= remote_limit():
+                raise JobError(
+                    "Remote scan concurrency limit reached. Stop a scan or wait for a slot.", 409
+                )
             llm = self.llm_profiles.selected()
             env = os.environ.copy()
             if llm is not None:
                 env["NATSUHAT_DASHBOARD_LLM"] = json.dumps(llm)
-            name = f"local-{uuid.uuid4().hex}"
+            name = f"{runner}-{uuid.uuid4().hex}"
             run_dir = self.base_dir / name
             run_dir.mkdir(mode=0o700)
             job: dict[str, Any] = {
@@ -153,39 +191,47 @@ class ScanJobManager:
                 "exit_code": None,
                 "error": None,
                 "llm_model": llm["model"] if llm is not None else None,
+                "runner": runner,
             }
             self._jobs[name] = job
             self._save(job)
             if instruction.strip():
                 (run_dir / "instructions.txt").write_text(instruction, encoding="utf-8")
-            command = [sys.executable, "-m", "natsuhat.interface.viewer.job_runner", str(run_dir)]
-            try:
-                with (run_dir / "job.log").open("wb") as log:
-                    process = subprocess.Popen(  # noqa: S603 - fixed Python module, no shell
-                        command,
-                        cwd=self.base_dir.parent,
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                        # Keep ownership locked even if the viewer crashes while
-                        # its child still runs. Never adopt arbitrary saved PIDs.
-                        pass_fds=(self._owner.fileno(),),
-                    )
-            except OSError:
-                job.update(
-                    status="failed", end_time=_now(), error="Could not start the scan process."
-                )
-                self._save(job)
-                raise JobError(str(job["error"]), 503) from None
-            self._processes[name] = process
-            job["status"] = "running"
-            self._save(job)
-            watcher = threading.Thread(target=self._wait, args=(name, process), daemon=True)
-            self._watchers.append(watcher)
-            watcher.start()
+            self._launch(job, env=env)
             return dict(job)
+
+    def _launch(
+        self, job: dict[str, Any], *, env: dict[str, str] | None = None, cleanup: bool = False
+    ) -> None:
+        name = job["id"]
+        run_dir = self.base_dir / name
+        command = [sys.executable, "-m", "natsuhat.interface.viewer.job_runner", str(run_dir)]
+        if cleanup:
+            command.append("--cleanup")
+            job["cleanup_only"] = True
+        try:
+            with (run_dir / "job.log").open("ab" if cleanup else "wb") as log:
+                process = subprocess.Popen(  # noqa: S603 - fixed Python module, no shell
+                    command,
+                    cwd=self.base_dir.parent,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    # Children retain ownership if the viewer crashes; never adopt saved PIDs.
+                    pass_fds=(self._owner.fileno(),),
+                )
+        except OSError:
+            job.update(status="failed", end_time=_now(), error="Could not start the scan process.")
+            self._save(job)
+            raise JobError(str(job["error"]), 503) from None
+        self._processes[name] = process
+        job["status"] = "stopping" if cleanup else "running"
+        self._save(job)
+        watcher = threading.Thread(target=self._wait, args=(name, process), daemon=True)
+        self._watchers.append(watcher)
+        watcher.start()
 
     def rerun(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -194,6 +240,11 @@ class ScanJobManager:
                 raise JobError("Unknown local scan job.", 404)
             if job["status"] != "failed":
                 raise JobError("Only failed scan jobs can be rerun.", 409)
+            remote = self._runner_state(name).get("remote", {})
+            if remote.get("cleanup") == "failed" or remote.get("results_pending"):
+                raise JobError(
+                    "Retry results or sandbox cleanup before starting another scan.", 409
+                )
             instructions = self.base_dir / name / "instructions.txt"
             return self.start(
                 {
@@ -203,6 +254,7 @@ class ScanJobManager:
                     "instruction": instructions.read_text(encoding="utf-8")
                     if instructions.exists()
                     else "",
+                    "runner": job.get("runner", "local"),
                     "authorized": body.get("authorized"),
                 }
             )
@@ -230,11 +282,33 @@ class ScanJobManager:
                 }
             ):
                 status = record["status"]
+            remote = self._runner_state(name).get("remote", {})
+            if job.pop("cleanup_only", False):
+                status = record.get("status", "interrupted")
+                if status in ACTIVE_STATUSES:
+                    status = "interrupted"
+            if remote and remote.get("cleanup") not in RETAINED | {"failed"}:
+                remote.update(
+                    cleanup="failed",
+                    phase="Cleanup unconfirmed",
+                    error="Worker exited before sandbox retention was confirmed. Retry cleanup.",
+                )
+                atomic_write_text(self.base_dir / name / "runner.json", json.dumps(remote))
+            if remote.get("cleanup") == "failed" or remote.get("results_pending"):
+                status = "failed"
             job.update(status=status, exit_code=code, end_time=_now())
+            if status != "failed":
+                job["error"] = None
             if status == "failed":
-                job["error"] = "Scan exited with an error. Check the local job log."
+                job["error"] = (
+                    remote.get("error") or "Scan exited with an error. Check the job log."
+                )
             if code == -signal.SIGKILL:
-                job["error"] = "Forced stop after 30s. Check Docker for leftover scan containers."
+                job["error"] = (
+                    "Remote worker force-stopped. Retry sandbox pause/archive cleanup."
+                    if job.get("runner", "local") != "local"
+                    else "Forced stop after 30s. Check Docker for leftover scan containers."
+                )
             try:
                 self._save(job)
             finally:
@@ -246,6 +320,12 @@ class ScanJobManager:
             if job is None:
                 raise JobError("Unknown local scan job.", 404)
             process = self._processes.get(name)
+            remote = self._runner_state(name).get("remote", {})
+            if process is None and (
+                remote.get("cleanup") == "failed" or remote.get("results_pending")
+            ):
+                self._launch(job, cleanup=True)
+                return dict(job)
             if process is not None and process.poll() is None and job["status"] != "stopping":
                 job["status"] = "stopping"
                 self._save(job)
@@ -253,13 +333,14 @@ class ScanJobManager:
                 # down Docker. Escalate the process group only if it cannot exit.
                 with contextlib.suppress(ProcessLookupError):
                     process.terminate()
-                threading.Thread(target=self._escalate, args=(process,), daemon=True).start()
+                grace = 1080 if job.get("runner", "local") != "local" else 30
+                threading.Thread(target=self._escalate, args=(process, grace), daemon=True).start()
             return dict(job)
 
     @staticmethod
-    def _escalate(process: subprocess.Popen[bytes]) -> None:
+    def _escalate(process: subprocess.Popen[bytes], grace: int) -> None:
         try:
-            process.wait(timeout=30)
+            process.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
@@ -268,18 +349,21 @@ class ScanJobManager:
         with self._lock:
             if name not in self._jobs:
                 raise JobError("Unknown local scan job.", 404)
-        path = self.base_dir / name / "job.log"
-        if not path.exists():
-            return ""
-        with path.open("rb") as stream:
-            stream.seek(max(0, path.stat().st_size - 32768))
-            return stream.read(32768).decode("utf-8", errors="replace")
+        directory = self.base_dir / name
+        output = ""
+        for path in (directory / "job.log", directory / "remote.log"):
+            if path.exists():
+                with path.open("rb") as stream:
+                    stream.seek(max(0, path.stat().st_size - 32768))
+                    output += stream.read(32768).decode("utf-8", errors="replace")
+        return output
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
             for name in list(self._processes):
                 self.stop(name)
+        deadline = time.monotonic() + 1085
         for watcher in self._watchers:
-            watcher.join(timeout=35)
+            watcher.join(timeout=max(0, deadline - time.monotonic()))
         self._owner.close()

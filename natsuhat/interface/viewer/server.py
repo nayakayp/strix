@@ -276,7 +276,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             elif path == "/api/llm/settings":
                 self._send_json(HTTPStatus.OK, manager.llm_profiles.public())
             elif path == "/api/jobs":
-                self._send_json(HTTPStatus.OK, {"jobs": manager.list(), "max_concurrent": 1})
+                self._send_json(HTTPStatus.OK, {"jobs": manager.list(), **manager.configuration()})
             elif path.endswith("/log"):
                 name = unquote(path.removeprefix("/api/jobs/").removesuffix("/log"))
                 try:

@@ -260,7 +260,7 @@ export default function App() {
             </div>
             {run?.summary.runId && <LiveIndicator finished={run.finished} />}
             <div className="ml-auto flex w-full min-w-0 max-w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-              {canManageScans && <button onClick={() => userSetView("scans")} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-colors hover:border-[#666] ${view === "scans" ? "border-emerald-500/50 text-emerald-400" : "border-[#333] text-white"}`}>Local scans</button>}
+              {canManageScans && <button onClick={() => userSetView("scans")} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-colors hover:border-[#666] ${view === "scans" ? "border-emerald-500/50 text-emerald-400" : "border-[#333] text-white"}`}>Scans</button>}
               {canManageScans && <button onClick={() => userSetView("settings")} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-colors hover:border-[#666] ${view === "settings" ? "border-emerald-500/50 text-emerald-400" : "border-[#333] text-white"}`}>LLM settings</button>}
               {runs && !runs.locked && runs.runs.length > 0 && (
                 <RunSwitcher
