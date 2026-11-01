@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from strix.config import load_settings
-from strix.llm import context_budget
+from natsuhat.config import load_settings
+from natsuhat.llm import context_budget
 
 
 if TYPE_CHECKING:

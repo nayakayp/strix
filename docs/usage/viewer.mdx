@@ -1,22 +1,22 @@
 ---
 title: "Local Web Viewer"
-description: "Browse a run in a local dashboard with strix view"
+description: "Browse a run in a local dashboard with natsuhat view"
 ---
 
-Every scan writes its results to disk as it runs. `strix view` serves those files in a local dashboard, for a live run or a finished one.
+Every scan writes its results to disk as it runs. `natsuhat view` serves those files in a local dashboard, for a live run or a finished one.
 
 ```bash
-strix view                                    # the most recent run
-strix view my-run-name                        # a specific run under ./strix_runs
-strix view --host 0.0.0.0 --port 8080 --no-open
+natsuhat view                                    # the most recent run
+natsuhat view my-run-name                        # a specific run under ./natsuhat_runs
+natsuhat view --host 0.0.0.0 --port 8080 --no-open
 ```
 
-The UI ships prebuilt with Strix, so there is no extra install and no JavaScript build step. Reading saved runs does not upload them, and you do not need a cloud account. Launching scans uses your configured LLM provider; report-email and feedback forms retain their existing relay integration.
+The UI ships prebuilt with Natsuhat, so there is no extra install and no JavaScript build step. Reading saved runs does not upload them, and you do not need a hosted account. Launching scans uses your configured LLM provider. There is no remote report-email or feedback service.
 
 ## Options
 
 <ParamField path="run" type="string">
-  Run name under `./strix_runs`. Defaults to the most recent run.
+  Run name under `./natsuhat_runs`. Defaults to the most recent run.
 </ParamField>
 
 <ParamField path="--host" type="string" default="127.0.0.1">
@@ -40,15 +40,15 @@ The UI ships prebuilt with Strix, so there is no extra install and no JavaScript
 - **Overview** — run status, target, and a severity breakdown of everything found so far.
 - **Vulnerabilities** — each validated finding with its severity, details, and reproduction steps.
 - **Agent graph** — a live map of the multi-agent team, and what each agent is doing.
-- **Steering** — send instructions to a live scan to redirect the agents during the run. Steering works only in the dashboard the running scan opens. A standalone `strix view` has no live scan to steer.
-- **History** — browse runs alongside the opened run in the same `strix_runs/` directory. The private viewer link authorizes access; email verification is not required.
+- **Steering** — send instructions to a live scan to redirect the agents during the run. Steering works only in the dashboard the running scan opens. A standalone `natsuhat view` has no live scan to steer.
+- **History** — browse runs alongside the opened run in the same `natsuhat_runs/` directory. The private viewer link authorizes access; email verification is not required.
 - **Local scans** — start a headless scan, inspect its status and log, stop it, and open its results. Available only with `--manage-scans`.
-- **Reports** — generate a shareable report and send it by email. Verify your email address first.
+- **Reports** — read the report saved locally with each run.
 
 ## Managing Local Scans
 
 ```bash
-uv run --frozen strix view --manage-scans --port 8080 --no-open
+uv run --frozen natsuhat view --manage-scans --port 8080 --no-open
 ```
 
 Open the private URL printed by the command, then choose **Local scans**. This
@@ -57,7 +57,7 @@ and a Python installation (uv/pip), not the standalone bundled executable.
 
 Configure Docker, the sandbox image, and your LLM provider as you would for a
 normal CLI scan. The worker reuses the headless CLI and inherits the server's
-environment and CLI configuration. No provider key is entered in the browser.
+environment and CLI configuration unless you select a dashboard LLM profile.
 Local paths refer to the server, not the browser's computer; source directories
 are mounted writable, just as in the CLI. Only submit targets you may test.
 
@@ -77,7 +77,7 @@ logs, and results unchanged. This starts over; it does not resume a scan. Reruns
 are disabled while another scan is active. Completed, stopped, and interrupted
 jobs cannot be rerun through this action.
 
-Jobs and their logs are persisted in `strix_runs/<job-id>/job.json` and `job.log`,
+Jobs and their logs are persisted in `natsuhat_runs/<job-id>/job.json` and `job.log`,
 alongside normal run artifacts. Logs may contain sensitive scan output. The UI
 shows the last 32 KiB of the log; the full log remains on disk.
 
@@ -128,9 +128,9 @@ dashboard jobs. An already running job keeps its original connection and prices.
 **Use server CLI settings instead** restores the previous CLI/environment behavior;
 dashboard settings never overwrite the global CLI configuration.
 
-Profiles survive restarts in `~/.strix/dashboard/<workspace-hash>/llm-providers.json`.
+Profiles survive restarts in `~/.natsuhat/dashboard/<workspace-hash>/llm-providers.json`.
 The hash identifies the workspace's canonical absolute path. The dashboard
-automatically migrates the old workspace `.strix/llm-providers.json`, verifies the
+automatically migrates the old workspace `.natsuhat/llm-providers.json`, verifies the
 saved data, then removes the old copy. Conflicting copies stop startup without
 overwriting either one. Keys remain **unencrypted**, with directory mode `0700`
 and file mode `0600`, and are never returned by the API. The credential directory
@@ -162,9 +162,9 @@ For one scan using a hosted LLM, a reasonable starting estimate is **4 vCPUs,
 monitor actual memory, CPU, image size, and artifact growth. No GPU is needed
 unless you host the model yourself.
 
-Docker resource limits are opt-in: set `STRIX_SANDBOX_MEM_LIMIT`,
-`STRIX_SANDBOX_CPUS`, `STRIX_SANDBOX_SHM_SIZE`, and optionally
-`STRIX_SANDBOX_PIDS_LIMIT` in the server environment. Leave capacity for the host
+Docker resource limits are opt-in: set `NATSUHAT_SANDBOX_MEM_LIMIT`,
+`NATSUHAT_SANDBOX_CPUS`, `NATSUHAT_SANDBOX_SHM_SIZE`, and optionally
+`NATSUHAT_SANDBOX_PIDS_LIMIT` in the server environment. Leave capacity for the host
 and viewer outside the sandbox limits. The job budget limits estimated LLM
 spending, not server CPU, memory, or wall-clock time.
 

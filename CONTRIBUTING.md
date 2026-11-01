@@ -1,6 +1,6 @@
-# Contributing to Strix
+# Contributing to Natsuhat
 
-Thank you for your interest in contributing to Strix! This guide will help you get started with development and contributions.
+Thank you for your interest in contributing to Natsuhat! This guide will help you get started with development and contributions.
 
 ## 🚀 Development Setup
 
@@ -16,8 +16,8 @@ Thank you for your interest in contributing to Strix! This guide will help you g
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/usestrix/strix.git
-   cd strix
+   git clone https://github.com/nayakayp/natsuhat.git
+   cd natsuhat
    ```
 
 2. **Install development dependencies**
@@ -31,54 +31,51 @@ Thank you for your interest in contributing to Strix! This guide will help you g
 
 3. **Configure your LLM provider**
    ```bash
-   export STRIX_LLM="openrouter/z-ai/glm-5.3"   # or vercel_ai_gateway/zai/glm-5.3
+   export NATSUHAT_LLM="openrouter/z-ai/glm-5.3"   # or vercel_ai_gateway/zai/glm-5.3
    export LLM_API_KEY="your-api-key"
    ```
 
-4. **Run Strix in development mode**
+4. **Run Natsuhat in development mode**
    ```bash
-   uv run strix --target https://example.com
+   uv run natsuhat --target https://example.com
    ```
 
 ### Dashboard UI development (no scan required)
 
-The dashboard in this repository is the local run viewer, not the managed
-`app.strix.ai` application. It uses React, TypeScript, Tailwind CSS and Vite, with
-a Python HTTP server reading run artifacts.
+The dashboard is the local run viewer. It uses React, TypeScript, Tailwind CSS
+and Vite, with a Python HTTP server reading run artifacts.
 
 With Python 3.12+, uv and Node.js 24 installed, run from the repository root:
 
 ```bash
 uv sync --frozen
-npm --prefix strix/interface/viewer/frontend ci
+npm --prefix natsuhat/interface/viewer/frontend ci
 make viewer-dev
 ```
 
 Open the local URL printed by Vite. Edit
-`strix/interface/viewer/frontend/src/` for hot-reloading UI changes. Restart
+`natsuhat/interface/viewer/frontend/src/` for hot-reloading UI changes. Restart
 `make viewer-dev` after editing Python code or the demo fixtures in
 `scripts/viewer_dev.py`. Set `PORT` to choose a port (default: 5173).
 
 The launcher creates disposable synthetic data: three runs, findings with
 different severities, and a two-agent graph. It never scans a target, starts
-Docker, uses an LLM, or writes to `strix_runs/`. Telemetry is disabled and viewer
-email credentials are isolated from your normal profile. The Vite server proxies
+Docker, uses an LLM, or writes to `natsuhat_runs/`. Telemetry is disabled. The Vite server proxies
 the demo API with a server-side capability; do not expose this development server
 to untrusted users or point its proxy at real scan data.
 
 Past runs lists every run directory containing `run.json` alongside the launched
 run, newest activity first. Select a row to open its findings and report; no email
 verification is required. In normal use this is the current project's
-`strix_runs/`, not a search across the whole machine or Strix Cloud.
+`natsuhat_runs/`, not a search across the whole machine.
 
-Email report delivery and feedback retain their existing Strix relay integration;
-they are not mocked or unlocked by this demo. Using those forms can contact Strix.
-Live scan execution and steering are unavailable.
+There is no remote report-email or feedback service. Live scan execution and
+steering are unavailable in this synthetic preview.
 
 In an Amp orb, dependencies are already prepared. Start a supervised preview:
 
 ```bash
-amp orb service start viewer-dev --command 'make viewer-dev' --portal --title 'Strix dashboard development'
+amp orb service start viewer-dev --command 'make viewer-dev' --portal --title 'Natsuhat dashboard development'
 ```
 
 Use the portal URL returned by Amp, not the sandbox-local Vite URL. No viewer
@@ -91,8 +88,8 @@ run from the repository root:
 uv run --frozen python scripts/viewer_dev.py --manage-scans
 ```
 
-This mode reads `strix_runs/` and persists provider profiles in
-`~/.strix/dashboard/<workspace-hash>/llm-providers.json`, outside the project;
+This mode reads `natsuhat_runs/` and persists provider profiles in
+`~/.natsuhat/dashboard/<workspace-hash>/llm-providers.json`, outside the project;
 existing workspace profiles migrate automatically. It works before the first
 scan exists. It does not create demo records or launch scans automatically.
 In Amp orbs (`AMP_ORB=1`), it checks Docker before serving the UI: a ready daemon
@@ -118,26 +115,24 @@ Provider credentials remain local and are never committed or installed by setup.
 For a Docker-free, read-only preview, keep using `make viewer-dev` without
 `--manage-scans`.
 
-If Docker works but the registry returns `404` for the configured sandbox tag,
-the image may not have been published yet. Build it locally from this checkout
-instead of switching to an older image that may lack security fixes:
+Build the sandbox locally from this checkout before starting a scan:
 
 ```bash
-STRIX_IMAGE=ghcr.io/usestrix/strix-sandbox:1.3.1 bash scripts/docker.sh
+bash scripts/docker.sh local
 ```
 
-Use the image name configured for your run. `STRIX_IMAGE` selects the complete
-local image tag for this build; it does not push anything to the registry or
-launch a scan. Without it, the helper still builds `strix-sandbox:dev`, or
-`strix-sandbox:<tag>` when given a positional tag. The build context contains
+This builds the default runtime image, `natsuhat-sandbox:local`.
+`NATSUHAT_IMAGE` can select a different complete local image tag; it does not
+push anything to a registry or launch a scan. Without a positional tag, the
+helper builds `natsuhat-sandbox:dev`. The build context contains
 only the Dockerfile, entrypoint, and proxy client, not provider keys or run data.
 Building the tools takes time and several GiB of disk space; do this at runtime,
 not in `.agents/setup` or `.agents/resume`. Each new orb needs the image pulled
 or built in its own Docker daemon before a scan can use it.
 
 Before shipping frontend changes, run `make viewer` and include both the source
-and rebuilt `strix/interface/viewer/static/` bundle. To inspect real results
-instead, use `uv run --frozen strix view <run-name>` with an existing run and keep
+and rebuilt `natsuhat/interface/viewer/static/` bundle. To inspect real results
+instead, use `uv run --frozen natsuhat view <run-name>` with an existing run and keep
 its authorization URL private.
 
 ### Development in Amp orbs
@@ -145,7 +140,7 @@ its authorization URL private.
 Amp automatically runs the executable `.agents/setup` on a fresh orb. It prepares
 Python 3.12, checksum-verified Node 24 and Go 1.24.x toolchains, system build tools,
 ShellCheck, Docker, and dependencies from the Python, npm, and Go lockfiles. It does
-not start scans, download the large Strix sandbox image, authenticate accounts, or
+not start scans, download the large Natsuhat sandbox image, authenticate accounts, or
 require API keys. It preserves any existing `core.hooksPath` (including Amp's hooks);
 otherwise it installs the project's pre-commit hook.
 
@@ -179,16 +174,15 @@ before starting a scan and do not silently substitute a paid cloud scan.
 
 For a viewer portal after a run exists, follow **Developing with Amp** in
 [`AGENTS.md`](AGENTS.md). Keep viewer authorization tokens private. Store LLM keys
-and Strix cloud tokens in Amp **Secrets & Env Vars**, not repository files or setup
-scripts. Cloud login, source uploads, scan charges, and billing are not part of
-development setup.
+in Amp **Secrets & Env Vars**, not repository files or setup scripts. Development
+setup does not authenticate with providers or start scans.
 
 These files configure future orbs once they reach the Amp project's default branch.
 Until then, they apply only to the checkout where you run them.
 
 ## 📚 Contributing Skills
 
-Skills are specialized knowledge packages that enhance agent capabilities. See [strix/skills/README.md](strix/skills/README.md) for detailed guidelines.
+Skills are specialized knowledge packages that enhance agent capabilities. See [natsuhat/skills/README.md](natsuhat/skills/README.md) for detailed guidelines.
 
 ### Quick Guide
 
@@ -230,7 +224,7 @@ Skills are specialized knowledge packages that enhance agent capabilities. See [
 When reporting bugs, please include:
 
 - Python version and OS
-- Strix version
+- Natsuhat version
 - LLMs being used
 - Full error traceback
 - Steps to reproduce
@@ -248,17 +242,17 @@ We welcome feature ideas! Please:
 
 ## 🖥️ Local viewer SPA
 
-`strix view` serves a prebuilt web UI whose source lives in
-`strix/interface/viewer/frontend/` (a Vite + React project) and whose built output is
-committed to `strix/interface/viewer/static/` and shipped in the package. End users never
-run a JS build. If you change anything under `strix/interface/viewer/frontend/`, rebuild
+`natsuhat view` serves a prebuilt web UI whose source lives in
+`natsuhat/interface/viewer/frontend/` (a Vite + React project) and whose built output is
+committed to `natsuhat/interface/viewer/static/` and shipped in the package. End users never
+run a JS build. If you change anything under `natsuhat/interface/viewer/frontend/`, rebuild
 and commit the output:
 
 ```bash
-make viewer   # or: cd strix/interface/viewer/frontend && npm ci && npm run build
+make viewer   # or: cd natsuhat/interface/viewer/frontend && npm ci && npm run build
 ```
 
-Commit both the source change and the regenerated `strix/interface/viewer/static/`.
+Commit both the source change and the regenerated `natsuhat/interface/viewer/static/`.
 
 ## Package builds
 
@@ -271,15 +265,14 @@ make wheel
 ```
 
 The build hook (`scripts/tui_sidecar_hook.py`) compiles the sidecar, embeds it as
-`strix/bin/strix-tui`, and assigns the current platform tag. It requires Go
+`natsuhat/bin/natsuhat-tui`, and assigns the current platform tag. It requires Go
 1.24.x or newer and fails rather than producing a wheel without the sidecar.
-`scripts/build.sh` and `strix.spec` are likewise strict for frozen PyInstaller
+`scripts/build.sh` and `natsuhat.spec` are likewise strict for frozen PyInstaller
 releases.
 
 ## 🤝 Community
 
-- **Discord**: [Join our community](https://discord.gg/strix-ai)
-- **Issues**: [GitHub Issues](https://github.com/usestrix/strix/issues)
+- **Issues**: [GitHub Issues](https://github.com/nayakayp/natsuhat/issues)
 
 ## ✨ Recognition
 
@@ -290,4 +283,4 @@ We value all contributions! Contributors will be:
 
 ---
 
-**Questions?** Reach out on [Discord](https://discord.gg/strix-ai) or create an issue. We're here to help!
+**Questions?** Reach out on the repository issue tracker or create an issue. We're here to help!

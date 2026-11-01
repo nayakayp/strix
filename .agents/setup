@@ -55,7 +55,7 @@ download_dir="$(mktemp -d)"
 trap 'rm -rf -- "$download_dir"' EXIT
 
 echo "==> Preparing Node $node_version and Go $go_version (${SECONDS}s)"
-node_home="/usr/local/lib/strix-node-$node_version"
+node_home="/usr/local/lib/natsuhat-node-$node_version"
 if [[ ! -x "$node_home/bin/node" ]]; then
   curl -fsSL --retry 3 "https://nodejs.org/dist/v$node_version/node-v$node_version-linux-$node_arch.tar.xz" -o "$download_dir/node.tar.xz"
   echo "$node_sha  $download_dir/node.tar.xz" | sha256sum --check --status
@@ -66,7 +66,7 @@ for binary in node npm npx; do
   sudo ln -sfn "$node_home/bin/$binary" "/usr/local/bin/$binary"
 done
 
-go_home="/usr/local/lib/strix-go-$go_version"
+go_home="/usr/local/lib/natsuhat-go-$go_version"
 if [[ ! -x "$go_home/bin/go" ]]; then
   curl -fsSL --retry 3 "https://go.dev/dl/go$go_version.linux-$go_arch.tar.gz" -o "$download_dir/go.tar.gz"
   echo "$go_sha  $download_dir/go.tar.gz" | sha256sum --check --status
@@ -84,7 +84,7 @@ uv sync --locked --python 3.12
 echo "==> Installing locked viewer dependencies (${SECONDS}s)"
 # npm ci always deletes node_modules, even in a warm project snapshot. Record
 # successful installs inside node_modules so deleting it also invalidates the cache.
-viewer_dir=strix/interface/viewer/frontend
+viewer_dir=natsuhat/interface/viewer/frontend
 viewer_stamp="$viewer_dir/node_modules/.amp-dependencies"
 viewer_dependencies="$(sha256sum "$viewer_dir/package.json" "$viewer_dir/package-lock.json"; node --version; npm --version)"
 if ! printf '%s\n' "$viewer_dependencies" | cmp -s - "$viewer_stamp"; then
@@ -95,7 +95,7 @@ else
 fi
 
 echo "==> Warming the Go module cache (${SECONDS}s)"
-(cd strix/interface/tui && go mod download)
+(cd natsuhat/interface/tui && go mod download)
 
 echo "==> Installing repository Git hooks (${SECONDS}s)"
 # Amp can own core.hooksPath for its own hooks. Never replace that configuration.

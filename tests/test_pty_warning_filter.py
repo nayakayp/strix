@@ -3,7 +3,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from strix.telemetry import logging as tlog
+from natsuhat.telemetry import logging as tlog
 
 
 _SDK_LOGGER = "agents.sandbox.sandboxes.docker"

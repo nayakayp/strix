@@ -14,9 +14,9 @@ from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
 
-from strix.config import loader
-from strix.config.loader import load_settings
-from strix.core.inputs import make_model_settings
+from natsuhat.config import loader
+from natsuhat.config.loader import load_settings
+from natsuhat.core.inputs import make_model_settings
 
 
 if TYPE_CHECKING:

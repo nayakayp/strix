@@ -1,10 +1,10 @@
-"""``STRIX_DOCKER_SANDBOX_DEVICES`` passes host devices through to the sandbox container."""
+"""``NATSUHAT_DOCKER_SANDBOX_DEVICES`` passes host devices through to the sandbox container."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from strix.runtime import docker_client
+from natsuhat.runtime import docker_client
 
 
 if TYPE_CHECKING:

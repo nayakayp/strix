@@ -1,9 +1,9 @@
 ---
 title: "Overview"
-description: "Configure your AI model for Strix"
+description: "Configure your AI model for Natsuhat"
 ---
 
-Strix uses [LiteLLM](https://docs.litellm.ai/docs/providers) for model compatibility, supporting 100+ LLM providers.
+Natsuhat uses [LiteLLM](https://docs.litellm.ai/docs/providers) for model compatibility, supporting 100+ LLM providers.
 
 ## Configuration
 
@@ -27,12 +27,12 @@ Frontier OpenAI, Anthropic and Gemini models need a cyber access program for sec
 
 <CodeGroup>
 ```bash Vercel AI Gateway
-export STRIX_LLM="vercel_ai_gateway/zai/glm-5.3"
+export NATSUHAT_LLM="vercel_ai_gateway/zai/glm-5.3"
 export LLM_API_KEY="your-api-key"
 ```
 
 ```bash OpenRouter
-export STRIX_LLM="openrouter/z-ai/glm-5.3"
+export NATSUHAT_LLM="openrouter/z-ai/glm-5.3"
 export LLM_API_KEY="your-api-key"
 ```
 </CodeGroup>
@@ -42,7 +42,7 @@ export LLM_API_KEY="your-api-key"
 Run models locally with [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible server:
 
 ```bash
-export STRIX_LLM="ollama/llama4"
+export NATSUHAT_LLM="ollama/llama4"
 export LLM_API_BASE="http://localhost:11434"
 ```
 

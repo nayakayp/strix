@@ -2431,7 +2431,7 @@ wheels = [
 ]
 
 [[package]]
-name = "strix-agent"
+name = "natsuhat-agent"
 version = "1.7.0"
 source = { editable = "." }
 dependencies = [

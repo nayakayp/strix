@@ -1,6 +1,6 @@
-# Strix Documentation
+# Natsuhat Documentation
 
-Documentation source files for Strix, powered by [Mintlify](https://mintlify.com).
+Documentation source files for Natsuhat, powered by [Mintlify](https://mintlify.com).
 
 ## Local Preview
 

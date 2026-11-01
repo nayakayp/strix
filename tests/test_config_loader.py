@@ -1,4 +1,4 @@
-"""Tests for strix.config.loader: JSON overrides, alias resolution, persistence."""
+"""Tests for natsuhat.config.loader: JSON overrides, alias resolution, persistence."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import pytest
 from pydantic import AliasChoices, Field, ValidationError
 from pydantic.fields import FieldInfo
 
-from strix.config import loader
-from strix.config.settings import ContextSettings
+from natsuhat.config import loader
+from natsuhat.config.settings import ContextSettings
 
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 _LLM_ENV_KEYS = [
-    "STRIX_LLM",
+    "NATSUHAT_LLM",
     "LLM_API_KEY",
     "OPENAI_API_KEY",
     "LLM_API_BASE",
@@ -26,21 +26,21 @@ _LLM_ENV_KEYS = [
     "OPENAI_BASE_URL",
     "LITELLM_BASE_URL",
     "OLLAMA_API_BASE",
-    "STRIX_REASONING_EFFORT",
-    "STRIX_FORCE_REQUIRED_TOOL_CHOICE",
+    "NATSUHAT_REASONING_EFFORT",
+    "NATSUHAT_FORCE_REQUIRED_TOOL_CHOICE",
     "LLM_TIMEOUT",
     "PERPLEXITY_API_KEY",
     "EXA_API_KEY",
-    "STRIX_WEB_SEARCH_PROVIDER",
+    "NATSUHAT_WEB_SEARCH_PROVIDER",
     # RuntimeSettings
-    "STRIX_IMAGE",
-    "STRIX_RUNTIME_BACKEND",
+    "NATSUHAT_IMAGE",
+    "NATSUHAT_RUNTIME_BACKEND",
     # TelemetrySettings
-    "STRIX_TELEMETRY",
+    "NATSUHAT_TELEMETRY",
     # JSON-object settings
     "LLM_EXTRA_HEADERS",
     "LLM_EXTRA_BODY",
-    "STRIX_DEDUPE_MODEL",
+    "NATSUHAT_DEDUPE_MODEL",
     "DEDUPE_LLM_EXTRA_HEADERS",
     "DEDUPE_LLM_EXTRA_BODY",
 ]
@@ -79,7 +79,7 @@ def test_read_json_overrides_non_dict_env(tmp_path: Path) -> None:
 def test_read_json_overrides_maps_to_nested_settings(tmp_path: Path) -> None:
     path = tmp_path / "cli-config.json"
     path.write_text(
-        json.dumps({"env": {"STRIX_LLM": "my-model", "PERPLEXITY_API_KEY": "pk"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "my-model", "PERPLEXITY_API_KEY": "pk"}}),
         encoding="utf-8",
     )
     assert loader._read_json_overrides(path) == {
@@ -91,7 +91,7 @@ def test_read_json_overrides_maps_to_nested_settings(tmp_path: Path) -> None:
 def test_read_json_overrides_maps_exa_and_provider(tmp_path: Path) -> None:
     path = tmp_path / "cli-config.json"
     path.write_text(
-        json.dumps({"env": {"EXA_API_KEY": "exa-key", "STRIX_WEB_SEARCH_PROVIDER": "exa"}}),
+        json.dumps({"env": {"EXA_API_KEY": "exa-key", "NATSUHAT_WEB_SEARCH_PROVIDER": "exa"}}),
         encoding="utf-8",
     )
     assert loader._read_json_overrides(path) == {
@@ -102,9 +102,9 @@ def test_read_json_overrides_maps_exa_and_provider(tmp_path: Path) -> None:
 def test_read_json_overrides_skips_keys_already_in_environ(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STRIX_LLM", "from-env")
+    monkeypatch.setenv("NATSUHAT_LLM", "from-env")
     path = tmp_path / "cli-config.json"
-    path.write_text(json.dumps({"env": {"STRIX_LLM": "from-file"}}), encoding="utf-8")
+    path.write_text(json.dumps({"env": {"NATSUHAT_LLM": "from-file"}}), encoding="utf-8")
     # env wins -> the JSON value is not surfaced as an init kwarg.
     assert loader._read_json_overrides(path) == {}
 
@@ -125,9 +125,9 @@ def test_read_json_overrides_env_wins_case_insensitively(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Settings use case_sensitive=False, so a lowercase env var also counts as set.
-    monkeypatch.setenv("strix_llm", "from-env")
+    monkeypatch.setenv("natsuhat_llm", "from-env")
     path = tmp_path / "cli-config.json"
-    path.write_text(json.dumps({"env": {"STRIX_LLM": "from-file"}}), encoding="utf-8")
+    path.write_text(json.dumps({"env": {"NATSUHAT_LLM": "from-file"}}), encoding="utf-8")
     assert loader._read_json_overrides(path) == {}
 
 
@@ -141,11 +141,11 @@ def test_read_json_overrides_uses_json_when_no_alias_in_environ(tmp_path: Path) 
 
 def test_tool_output_max_bytes_rejects_sub_notice_values() -> None:
     with pytest.raises(ValidationError):
-        ContextSettings(STRIX_TOOL_OUTPUT_MAX_BYTES=64)
+        ContextSettings(NATSUHAT_TOOL_OUTPUT_MAX_BYTES=64)
 
 
 def test_tool_output_max_bytes_accepts_floor() -> None:
-    assert ContextSettings(STRIX_TOOL_OUTPUT_MAX_BYTES=1024).tool_output_max_bytes == 1024
+    assert ContextSettings(NATSUHAT_TOOL_OUTPUT_MAX_BYTES=1024).tool_output_max_bytes == 1024
 
 
 # --------------------------------------------------------------------------- #
@@ -183,7 +183,7 @@ def test_aliases_for_no_alias() -> None:
 def test_apply_override_and_load_settings_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "cli-config.json"
     path.write_text(
-        json.dumps({"env": {"STRIX_LLM": "round-trip-model", "PERPLEXITY_API_KEY": "pk"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "round-trip-model", "PERPLEXITY_API_KEY": "pk"}}),
         encoding="utf-8",
     )
 
@@ -198,9 +198,9 @@ def test_apply_override_and_load_settings_round_trip(tmp_path: Path) -> None:
 
 def test_apply_config_override_invalidates_cache(tmp_path: Path) -> None:
     first = tmp_path / "first.json"
-    first.write_text(json.dumps({"env": {"STRIX_LLM": "first-model"}}), encoding="utf-8")
+    first.write_text(json.dumps({"env": {"NATSUHAT_LLM": "first-model"}}), encoding="utf-8")
     second = tmp_path / "second.json"
-    second.write_text(json.dumps({"env": {"STRIX_LLM": "second-model"}}), encoding="utf-8")
+    second.write_text(json.dumps({"env": {"NATSUHAT_LLM": "second-model"}}), encoding="utf-8")
 
     loader.apply_config_override(first)
     assert loader.load_settings().llm.model == "first-model"
@@ -215,7 +215,7 @@ def test_apply_config_override_invalidates_cache(tmp_path: Path) -> None:
 
 
 def test_persist_current_writes_env_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_LLM", "persisted-model")
+    monkeypatch.setenv("NATSUHAT_LLM", "persisted-model")
     target = tmp_path / "sub" / "cli-config.json"
     loader.apply_config_override(target)
 
@@ -223,14 +223,14 @@ def test_persist_current_writes_env_block(tmp_path: Path, monkeypatch: pytest.Mo
 
     assert target.exists()
     assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"STRIX_LLM": "persisted-model"}
+        "env": {"NATSUHAT_LLM": "persisted-model"}
     }
 
 
 def test_persist_current_keeps_file_values_when_env_is_unset(tmp_path: Path) -> None:
     target = tmp_path / "cli-config.json"
     target.write_text(
-        json.dumps({"env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
         encoding="utf-8",
     )
     loader.apply_config_override(target)
@@ -239,7 +239,7 @@ def test_persist_current_keeps_file_values_when_env_is_unset(tmp_path: Path) -> 
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}
+        "env": {"NATSUHAT_LLM": "file-model", "LLM_API_KEY": "file-key"}
     }
 
 
@@ -248,7 +248,7 @@ def test_persist_current_env_overrides_file_value(
 ) -> None:
     target = tmp_path / "cli-config.json"
     target.write_text(
-        json.dumps({"env": {"STRIX_LLM": "file-model", "PERPLEXITY_API_KEY": "file-pplx"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "file-model", "PERPLEXITY_API_KEY": "file-pplx"}}),
         encoding="utf-8",
     )
     loader.apply_config_override(target)
@@ -257,7 +257,7 @@ def test_persist_current_env_overrides_file_value(
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"STRIX_LLM": "file-model", "PERPLEXITY_API_KEY": "env-pplx"}
+        "env": {"NATSUHAT_LLM": "file-model", "PERPLEXITY_API_KEY": "env-pplx"}
     }
 
 
@@ -269,7 +269,7 @@ def test_linked_llm_model_change_drops_stored_key_and_base(
         json.dumps(
             {
                 "env": {
-                    "STRIX_LLM": "file-model",
+                    "NATSUHAT_LLM": "file-model",
                     "LLM_API_KEY": "file-key",
                     "LLM_API_BASE": "http://file-base",
                     "PERPLEXITY_API_KEY": "pplx",
@@ -279,7 +279,7 @@ def test_linked_llm_model_change_drops_stored_key_and_base(
         encoding="utf-8",
     )
     loader.apply_config_override(target)
-    monkeypatch.setenv("STRIX_LLM", "env-model")
+    monkeypatch.setenv("NATSUHAT_LLM", "env-model")
 
     llm = loader.load_settings().llm
     assert llm.model == "env-model"
@@ -289,7 +289,7 @@ def test_linked_llm_model_change_drops_stored_key_and_base(
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"STRIX_LLM": "env-model", "PERPLEXITY_API_KEY": "pplx"}
+        "env": {"NATSUHAT_LLM": "env-model", "PERPLEXITY_API_KEY": "pplx"}
     }
 
 
@@ -298,7 +298,7 @@ def test_linked_llm_key_change_drops_stored_model(
 ) -> None:
     target = tmp_path / "cli-config.json"
     target.write_text(
-        json.dumps({"env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
         encoding="utf-8",
     )
     loader.apply_config_override(target)
@@ -316,7 +316,7 @@ def test_linked_llm_secondary_alias_in_env_is_not_a_change(
 ) -> None:
     target = tmp_path / "cli-config.json"
     target.write_text(
-        json.dumps({"env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
         encoding="utf-8",
     )
     loader.apply_config_override(target)
@@ -330,7 +330,7 @@ def test_linked_llm_secondary_alias_in_env_is_not_a_change(
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}
+        "env": {"NATSUHAT_LLM": "file-model", "LLM_API_KEY": "file-key"}
     }
 
 
@@ -339,18 +339,18 @@ def test_linked_llm_unchanged_env_keeps_stored_key(
 ) -> None:
     target = tmp_path / "cli-config.json"
     target.write_text(
-        json.dumps({"env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
         encoding="utf-8",
     )
     loader.apply_config_override(target)
-    monkeypatch.setenv("STRIX_LLM", "file-model")
+    monkeypatch.setenv("NATSUHAT_LLM", "file-model")
 
     assert loader.load_settings().llm.api_key == "file-key"
 
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}
+        "env": {"NATSUHAT_LLM": "file-model", "LLM_API_KEY": "file-key"}
     }
 
 
@@ -372,7 +372,7 @@ def test_persist_current_empty_env_clears_file_value(
 ) -> None:
     target = tmp_path / "cli-config.json"
     target.write_text(
-        json.dumps({"env": {"STRIX_LLM": "file-model", "PERPLEXITY_API_KEY": "pplx"}}),
+        json.dumps({"env": {"NATSUHAT_LLM": "file-model", "PERPLEXITY_API_KEY": "pplx"}}),
         encoding="utf-8",
     )
     loader.apply_config_override(target)
@@ -380,7 +380,7 @@ def test_persist_current_empty_env_clears_file_value(
 
     loader.persist_current()
 
-    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"STRIX_LLM": "file-model"}}
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"NATSUHAT_LLM": "file-model"}}
 
 
 def test_persist_current_empty_primary_alias_does_not_save_sibling(
@@ -405,11 +405,11 @@ def test_persist_current_replaces_corrupt_file(
     target = tmp_path / "cli-config.json"
     target.write_text("{not json", encoding="utf-8")
     loader.apply_config_override(target)
-    monkeypatch.setenv("STRIX_LLM", "env-model")
+    monkeypatch.setenv("NATSUHAT_LLM", "env-model")
 
     loader.persist_current()
 
-    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"STRIX_LLM": "env-model"}}
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"NATSUHAT_LLM": "env-model"}}
 
 
 @pytest.mark.parametrize(
@@ -457,14 +457,14 @@ def test_invalid_saved_json_object_setting_is_rejected(tmp_path: Path) -> None:
 
 def test_saved_string_setting_is_not_json_decoded(tmp_path: Path) -> None:
     target = tmp_path / "cli-config.json"
-    target.write_text(json.dumps({"env": {"STRIX_LLM": '{"not": "decoded"}'}}), encoding="utf-8")
+    target.write_text(json.dumps({"env": {"NATSUHAT_LLM": '{"not": "decoded"}'}}), encoding="utf-8")
     loader.apply_config_override(target)
 
     assert loader.load_settings().llm.model == '{"not": "decoded"}'
 
 
 def test_persist_current_sets_0600_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_LLM", "persisted-model")
+    monkeypatch.setenv("NATSUHAT_LLM", "persisted-model")
     target = tmp_path / "cli-config.json"
     loader.apply_config_override(target)
 

@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-APP=strix
-REPO="usestrix/strix"
-STRIX_IMAGE="ghcr.io/usestrix/strix-sandbox:1.3.1"
+APP=natsuhat
+REPO="nayakayp/natsuhat"
+NATSUHAT_IMAGE="natsuhat-sandbox:local"
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'
@@ -70,7 +70,7 @@ if [ "$os" = "windows" ]; then
     fi
 fi
 
-INSTALL_DIR=$HOME/.strix/bin
+INSTALL_DIR=$HOME/.natsuhat/bin
 mkdir -p "$INSTALL_DIR"
 
 if [ -z "$requested_version" ]; then
@@ -103,21 +103,21 @@ check_existing_installation() {
     local found_paths=()
     while IFS= read -r -d '' path; do
         found_paths+=("$path")
-    done < <(which -a strix 2>/dev/null | tr '\n' '\0' || true)
+    done < <(which -a natsuhat 2>/dev/null | tr '\n' '\0' || true)
 
     if [ ${#found_paths[@]} -gt 0 ]; then
         for path in "${found_paths[@]}"; do
-            if [[ ! -e "$path" ]] || [[ "$path" == "$INSTALL_DIR/strix"* ]]; then
+            if [[ ! -e "$path" ]] || [[ "$path" == "$INSTALL_DIR/natsuhat"* ]]; then
                 continue
             fi
 
             if [[ -n "$path" ]]; then
-                echo -e "${MUTED}Found existing strix at: ${NC}$path"
+                echo -e "${MUTED}Found existing natsuhat at: ${NC}$path"
 
                 if [[ "$path" == *".local/bin"* ]]; then
                     echo -e "${MUTED}Removing old pipx installation...${NC}"
                     if command -v pipx >/dev/null 2>&1; then
-                        pipx uninstall strix-agent 2>/dev/null || true
+                        pipx uninstall natsuhat-agent 2>/dev/null || true
                     fi
                     rm -f "$path" 2>/dev/null || true
                 elif [[ -L "$path" || -f "$path" ]]; then
@@ -132,10 +132,10 @@ check_existing_installation() {
 check_version() {
     check_existing_installation
 
-    if [[ -x "$INSTALL_DIR/strix" ]]; then
-        installed_version=$("$INSTALL_DIR/strix" --version 2>/dev/null | awk '{print $2}' || echo "")
+    if [[ -x "$INSTALL_DIR/natsuhat" ]]; then
+        installed_version=$("$INSTALL_DIR/natsuhat" --version 2>/dev/null | awk '{print $2}' || echo "")
         if [[ "$installed_version" == "$specific_version" ]]; then
-            print_message info "${GREEN}✓ Strix ${NC}$specific_version${GREEN} already installed${NC}"
+            print_message info "${GREEN}✓ Natsuhat ${NC}$specific_version${GREEN} already installed${NC}"
             SKIP_DOWNLOAD=true
         elif [[ -n "$installed_version" ]]; then
             print_message info "${MUTED}Installed: ${NC}$installed_version ${MUTED}→ Upgrading to ${NC}$specific_version"
@@ -144,7 +144,7 @@ check_version() {
 }
 
 download_and_install() {
-    print_message info "\n${CYAN}🦉 Installing Strix${NC} ${MUTED}version: ${NC}$specific_version"
+    print_message info "\n${CYAN}Installing Natsuhat${NC} ${MUTED}version: ${NC}$specific_version"
     print_message info "${MUTED}Platform: ${NC}$target\n"
 
     local tmp_dir=$(mktemp -d)
@@ -161,24 +161,24 @@ download_and_install() {
     echo -e "${MUTED}Extracting...${NC}"
     if [ "$os" = "windows" ]; then
         unzip -q "$filename"
-        mv "strix-${specific_version}-${target}.exe" "$INSTALL_DIR/strix.exe"
+        mv "natsuhat-${specific_version}-${target}.exe" "$INSTALL_DIR/natsuhat.exe"
     else
         tar -xzf "$filename"
-        mv "strix-${specific_version}-${target}" "$INSTALL_DIR/strix"
-        chmod 755 "$INSTALL_DIR/strix"
+        mv "natsuhat-${specific_version}-${target}" "$INSTALL_DIR/natsuhat"
+        chmod 755 "$INSTALL_DIR/natsuhat"
     fi
 
     cd - > /dev/null
     rm -rf "$tmp_dir"
 
-    echo -e "${GREEN}✓ Strix installed to $INSTALL_DIR${NC}"
+    echo -e "${GREEN}✓ Natsuhat installed to $INSTALL_DIR${NC}"
 }
 
 check_docker() {
     echo ""
     if ! command -v docker >/dev/null 2>&1; then
         echo -e "${YELLOW}⚠ Docker not found${NC}"
-        echo -e "${MUTED}Strix requires Docker to run the security sandbox.${NC}"
+        echo -e "${MUTED}Natsuhat requires Docker to run the security sandbox.${NC}"
         echo -e "${MUTED}Please install Docker: ${NC}https://docs.docker.com/get-docker/"
         echo ""
         return 1
@@ -186,22 +186,18 @@ check_docker() {
 
     if ! docker info >/dev/null 2>&1; then
         echo -e "${YELLOW}⚠ Docker daemon not running${NC}"
-        echo -e "${MUTED}Please start Docker and run: ${NC}docker pull $STRIX_IMAGE"
+        echo -e "${MUTED}Start Docker, then build the sandbox from a Natsuhat checkout:${NC}"
+        echo "bash scripts/docker.sh local"
         echo ""
         return 1
     fi
 
     echo -e "${MUTED}Checking for sandbox image...${NC}"
-    if docker image inspect "$STRIX_IMAGE" >/dev/null 2>&1; then
+    if docker image inspect "$NATSUHAT_IMAGE" >/dev/null 2>&1; then
         echo -e "${GREEN}✓ Sandbox image already available${NC}"
     else
-        echo -e "${MUTED}Pulling sandbox image (this may take a few minutes)...${NC}"
-        if docker pull "$STRIX_IMAGE"; then
-            echo -e "${GREEN}✓ Sandbox image pulled successfully${NC}"
-        else
-            echo -e "${YELLOW}⚠ Failed to pull sandbox image${NC}"
-            echo -e "${MUTED}You can pull it manually later: ${NC}docker pull $STRIX_IMAGE"
-        fi
+        echo -e "${YELLOW}⚠ Build the sandbox from a Natsuhat checkout before scanning:${NC}"
+        echo "bash scripts/docker.sh local"
     fi
     return 0
 }
@@ -213,9 +209,9 @@ add_to_path() {
     if grep -Fxq "$command" "$config_file" 2>/dev/null; then
         print_message info "${MUTED}PATH already configured in ${NC}$config_file"
     elif [[ -w $config_file ]]; then
-        echo -e "\n# strix" >> "$config_file"
+        echo -e "\n# natsuhat" >> "$config_file"
         echo "$command" >> "$config_file"
-        print_message info "${MUTED}Successfully added ${NC}strix ${MUTED}to \$PATH in ${NC}$config_file"
+        print_message info "${MUTED}Successfully added ${NC}natsuhat ${MUTED}to \$PATH in ${NC}$config_file"
     else
         print_message warning "Manually add the directory to $config_file (or similar):"
         print_message info "  $command"
@@ -292,25 +288,25 @@ setup_path() {
 verify_installation() {
     export PATH="$INSTALL_DIR:$PATH"
 
-    local which_strix=$(which strix 2>/dev/null || echo "")
+    local which_natsuhat=$(which natsuhat 2>/dev/null || echo "")
 
-    if [[ "$which_strix" != "$INSTALL_DIR/strix" && "$which_strix" != "$INSTALL_DIR/strix.exe" ]]; then
-        if [[ -n "$which_strix" ]]; then
-            echo -e "${YELLOW}⚠ Found conflicting strix at: ${NC}$which_strix"
+    if [[ "$which_natsuhat" != "$INSTALL_DIR/natsuhat" && "$which_natsuhat" != "$INSTALL_DIR/natsuhat.exe" ]]; then
+        if [[ -n "$which_natsuhat" ]]; then
+            echo -e "${YELLOW}⚠ Found conflicting natsuhat at: ${NC}$which_natsuhat"
             echo -e "${MUTED}Attempting to remove...${NC}"
 
-            if rm -f "$which_strix" 2>/dev/null; then
+            if rm -f "$which_natsuhat" 2>/dev/null; then
                 echo -e "${GREEN}✓ Removed conflicting installation${NC}"
             else
                 echo -e "${YELLOW}Could not remove automatically.${NC}"
-                echo -e "${MUTED}Please remove manually: ${NC}rm $which_strix"
+                echo -e "${MUTED}Please remove manually: ${NC}rm $which_natsuhat"
             fi
         fi
     fi
 
-    if [[ -x "$INSTALL_DIR/strix" ]]; then
-        local version=$("$INSTALL_DIR/strix" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
-        echo -e "${GREEN}✓ Strix ${NC}$version${GREEN} ready${NC}"
+    if [[ -x "$INSTALL_DIR/natsuhat" ]]; then
+        local version=$("$INSTALL_DIR/natsuhat" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+        echo -e "${GREEN}✓ Natsuhat ${NC}$version${GREEN} ready${NC}"
     fi
 }
 
@@ -337,17 +333,12 @@ echo -e "${MUTED}To get started:${NC}"
 echo ""
 echo -e "  ${CYAN}1.${NC} Set your environment:"
 echo -e "     ${MUTED}export LLM_API_KEY='your-api-key'${NC}"
-echo -e "     ${MUTED}export STRIX_LLM='openai/gpt-5.4'${NC}"
+echo -e "     ${MUTED}export NATSUHAT_LLM='openai/gpt-5.4'${NC}"
 echo ""
 echo -e "  ${CYAN}2.${NC} Run a penetration test:"
-echo -e "     ${MUTED}strix --target https://example.com${NC}"
+echo -e "     ${MUTED}natsuhat --target https://example.com${NC}"
 echo ""
-echo -e "${MUTED}For more information visit ${NC}https://strix.ai"
-echo -e "${MUTED}Supported models ${NC}https://docs.strix.ai/llm-providers/overview"
-echo -e "${MUTED}Join our community ${NC}https://discord.gg/strix-ai"
 echo ""
-echo -e "${MUTED}Run a pentest in Strix Cloud ${NC}https://app.strix.ai"
-echo -e "${MUTED}Enterprise ${NC}https://strix.ai/demo"
 echo ""
 
 echo -e "${YELLOW}→${NC} Run ${MUTED}source ~/.$(basename $SHELL)rc${NC} or open a new terminal"

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from strix.runtime.caido_handle import CaidoBootstrapHandle
+from natsuhat.runtime.caido_handle import CaidoBootstrapHandle
 
 
 class _FakeClient:

@@ -12,11 +12,11 @@ from __future__ import annotations
 import pytest
 from agents.tool import FunctionTool
 
-from strix.agents import factory
-from strix.tools.agents_graph.tools import agent_finish
-from strix.tools.finish.tool import finish_scan
-from strix.tools.reporting.tool import create_vulnerability_report
-from strix.tools.wait_for_user.tool import wait_for_user
+from natsuhat.agents import factory
+from natsuhat.tools.agents_graph.tools import agent_finish
+from natsuhat.tools.finish.tool import finish_scan
+from natsuhat.tools.reporting.tool import create_vulnerability_report
+from natsuhat.tools.wait_for_user.tool import wait_for_user
 
 
 _SCAN_AGENT_TOOLS = [

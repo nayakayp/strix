@@ -1,4 +1,4 @@
-"""Tests for pure input builders in strix.core.inputs."""
+"""Tests for pure input builders in natsuhat.core.inputs."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 import litellm
 import pytest
 
-from strix.core.inputs import (
+from natsuhat.core.inputs import (
     build_root_task,
     build_scan_targets,
     build_scope_context,
@@ -468,15 +468,18 @@ def test_openrouter_attribution_rides_on_the_request_headers() -> None:
         None, model_name="openrouter/anthropic/claude-sonnet-4-5"
     ).extra_headers
     assert headers == {
-        "HTTP-Referer": "https://strix.ai",
-        "X-Title": "Strix",
+        "HTTP-Referer": "https://github.com/nayakayp/natsuhat",
+        "X-Title": "Natsuhat",
         "X-OpenRouter-Categories": "cli-agent",
     }
 
 
 def test_vercel_ai_gateway_attribution_rides_on_the_request_headers() -> None:
     headers = make_model_settings(None, model_name="vercel_ai_gateway/zai/glm-5.3").extra_headers
-    assert headers == {"HTTP-Referer": "https://strix.ai", "X-Title": "Strix"}
+    assert headers == {
+        "HTTP-Referer": "https://github.com/nayakayp/natsuhat",
+        "X-Title": "Natsuhat",
+    }
 
 
 def test_openrouter_attribution_absent_for_other_providers() -> None:
@@ -492,7 +495,7 @@ def test_user_headers_override_openrouter_attribution() -> None:
     assert headers is not None
     assert headers["X-Title"] == "Custom"
     assert headers["X-Tenant"] == "acme"
-    assert headers["HTTP-Referer"] == "https://strix.ai"
+    assert headers["HTTP-Referer"] == "https://github.com/nayakayp/natsuhat"
 
 
 def test_reasoning_effort_sent_as_configured_and_none_omitted() -> None:

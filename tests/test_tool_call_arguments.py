@@ -22,8 +22,8 @@ from agents.run import RunConfig
 from openai import AsyncOpenAI, BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
 
-from strix.config.models import _NonStreamingModel, _TurnGuardModel
-from strix.config.tool_call_arguments import (
+from natsuhat.config.models import _NonStreamingModel, _TurnGuardModel
+from natsuhat.config.tool_call_arguments import (
     MALFORMED_ARGUMENTS_KEY,
     _loads_strict,
     describe_malformed_arguments,

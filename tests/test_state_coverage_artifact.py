@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from strix.core.paths import runtime_state_dir
-from strix.report.state import ReportState
-from strix.tools.coverage.tools import _record_impl, hydrate_coverage_from_disk
+from natsuhat.core.paths import runtime_state_dir
+from natsuhat.report.state import ReportState
+from natsuhat.tools.coverage.tools import _record_impl, hydrate_coverage_from_disk
 
 
 if TYPE_CHECKING:

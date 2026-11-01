@@ -1,0 +1,230 @@
+"""Natsuhat application settings — pydantic-settings powered."""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import AliasChoices, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+ApiType = Literal["responses", "chat_completions"]
+
+DEFAULT_MAX_TURNS = 500
+
+
+def _lowercase(value: object) -> object:
+    """Enum-like env values are matched case-insensitively (``None`` is ``none``)."""
+    return value.strip().lower() if isinstance(value, str) else value
+
+
+_BASE_CONFIG = SettingsConfigDict(
+    case_sensitive=False,
+    populate_by_name=True,
+    extra="ignore",
+)
+
+
+class LlmSettings(BaseSettings):
+    model_config = _BASE_CONFIG
+
+    model: str | None = Field(default=None, alias="NATSUHAT_LLM")
+    api_type: ApiType | None = Field(
+        default=None,
+        validation_alias=AliasChoices("NATSUHAT_API_TYPE", "NATSUHAT_FORCE_API"),
+        description="Force 'responses' or 'chat_completions' API path",
+    )
+    api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
+        repr=False,
+    )
+    api_base: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "LLM_API_BASE",
+            "OPENAI_API_BASE",
+            "OPENAI_BASE_URL",
+            "LITELLM_BASE_URL",
+            "OLLAMA_API_BASE",
+        ),
+    )
+    extra_headers: dict[str, str] | None = Field(
+        default=None,
+        alias="LLM_EXTRA_HEADERS",
+        repr=False,
+    )
+    extra_body: dict[str, Any] | None = Field(
+        default=None,
+        alias="LLM_EXTRA_BODY",
+        repr=False,
+    )
+    reasoning_effort: ReasoningEffort = Field(default="high", alias="NATSUHAT_REASONING_EFFORT")
+    input_cost_per_mtok: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False, alias="NATSUHAT_LLM_INPUT_COST_PER_MTOK"
+    )
+    output_cost_per_mtok: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False, alias="NATSUHAT_LLM_OUTPUT_COST_PER_MTOK"
+    )
+    cached_input_cost_per_mtok: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False, alias="NATSUHAT_LLM_CACHED_INPUT_COST_PER_MTOK"
+    )
+    force_required_tool_choice: bool = Field(
+        default=False,
+        alias="NATSUHAT_FORCE_REQUIRED_TOOL_CHOICE",
+    )
+    parallel_tool_calls: bool = Field(
+        default=False,
+        alias="NATSUHAT_PARALLEL_TOOL_CALLS",
+    )
+    prompt_cache: bool = Field(
+        default=True,
+        alias="NATSUHAT_PROMPT_CACHE",
+    )
+    # Providers cache prompts in fixed-size token blocks, so a fully cached prompt
+    # can read back up to a block short. 128 covers the largest common size
+    # (OpenAI; DeepSeek and GLM use 64, vLLM defaults to 16).
+    cache_block_tokens: int = Field(default=128, ge=1, alias="NATSUHAT_CACHE_BLOCK_TOKENS")
+    openrouter_sticky_sessions: bool = Field(
+        default=False,
+        alias="NATSUHAT_OPENROUTER_STICKY_SESSIONS",
+    )
+    disable_streaming: bool = Field(
+        default=False,
+        alias="LLM_DISABLE_STREAMING",
+    )
+    timeout: int = Field(default=300, alias="LLM_TIMEOUT")
+    preflight_timeout: int = Field(default=30, ge=1, alias="LLM_PREFLIGHT_TIMEOUT")
+    stream_idle_timeout: int = Field(default=300, ge=0, alias="LLM_STREAM_IDLE_TIMEOUT")
+    stream_first_event_timeout: int = Field(
+        default=120, ge=0, alias="LLM_STREAM_FIRST_EVENT_TIMEOUT"
+    )
+    stream_total_timeout: int = Field(default=600, ge=0, alias="LLM_STREAM_TOTAL_TIMEOUT")
+    max_tool_calls_per_turn: int = Field(
+        default=32,
+        ge=0,
+        alias="LLM_MAX_TOOL_CALLS_PER_TURN",
+    )
+
+    @field_validator("api_type", "reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_case(cls, value: object) -> object:
+        return _lowercase(value)
+
+
+class DedupeSettings(BaseSettings):
+    model_config = _BASE_CONFIG
+
+    model: str | None = Field(default=None, alias="NATSUHAT_DEDUPE_MODEL")
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        alias="NATSUHAT_DEDUPE_REASONING_EFFORT",
+    )
+    api_key: str | None = Field(default=None, alias="DEDUPE_LLM_API_KEY", repr=False)
+    api_base: str | None = Field(default=None, alias="DEDUPE_LLM_API_BASE")
+    extra_headers: dict[str, str] | None = Field(
+        default=None,
+        alias="DEDUPE_LLM_EXTRA_HEADERS",
+        repr=False,
+    )
+    extra_body: dict[str, Any] | None = Field(
+        default=None,
+        alias="DEDUPE_LLM_EXTRA_BODY",
+        repr=False,
+    )
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_case(cls, value: object) -> object:
+        return _lowercase(value)
+
+
+class ContextSettings(BaseSettings):
+    """Context-window management: per-tool-output caps and history compaction."""
+
+    model_config = _BASE_CONFIG
+
+    auto_compact: bool = Field(default=True, alias="NATSUHAT_CONTEXT_AUTO_COMPACT")
+    compact_buffer_tokens: int = Field(default=20_000, gt=0, alias="NATSUHAT_CONTEXT_BUFFER_TOKENS")
+    keep_tokens: int = Field(default=8_000, gt=0, alias="NATSUHAT_CONTEXT_KEEP_TOKENS")
+    fallback_context_tokens: int = Field(
+        default=200_000, gt=0, alias="NATSUHAT_CONTEXT_FALLBACK_TOKENS"
+    )
+    summary_max_tokens: int = Field(default=4_096, gt=0, alias="NATSUHAT_CONTEXT_SUMMARY_TOKENS")
+    tool_output_max_tokens: int = Field(
+        default=8_000, gt=0, alias="NATSUHAT_TOOL_OUTPUT_MAX_TOKENS"
+    )
+    tool_output_max_lines: int = Field(default=2_000, gt=0, alias="NATSUHAT_TOOL_OUTPUT_MAX_LINES")
+    # Floor above the truncation-notice size so a preview always fits.
+    tool_output_max_bytes: int = Field(
+        default=50 * 1024, ge=1024, alias="NATSUHAT_TOOL_OUTPUT_MAX_BYTES"
+    )
+
+
+class RuntimeSettings(BaseSettings):
+    model_config = _BASE_CONFIG
+
+    image: str = Field(
+        default="natsuhat-sandbox:local",
+        alias="NATSUHAT_IMAGE",
+    )
+    backend: str = Field(default="docker", alias="NATSUHAT_RUNTIME_BACKEND")
+    # Max screenshot/image tool outputs kept live per agent context (0 = none).
+    max_context_images: int = Field(default=3, ge=0, alias="NATSUHAT_MAX_CONTEXT_IMAGES")
+
+
+class TelemetrySettings(BaseSettings):
+    model_config = _BASE_CONFIG
+
+    enabled: bool = Field(default=False, alias="NATSUHAT_TELEMETRY")
+    run_record_timings: bool = Field(default=False, alias="NATSUHAT_RUN_RECORD_TIMINGS")
+
+
+WebSearchProvider = Literal["auto", "perplexity", "exa"]
+ExaSearchType = Literal["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"]
+
+
+class IntegrationSettings(BaseSettings):
+    model_config = _BASE_CONFIG
+
+    perplexity_api_key: str | None = Field(
+        default=None,
+        alias="PERPLEXITY_API_KEY",
+        repr=False,
+    )
+    exa_api_key: str | None = Field(
+        default=None,
+        alias="EXA_API_KEY",
+        repr=False,
+    )
+    web_search_provider: WebSearchProvider = Field(
+        default="auto",
+        alias="NATSUHAT_WEB_SEARCH_PROVIDER",
+    )
+    exa_search_type: ExaSearchType = Field(
+        default="auto",
+        alias="NATSUHAT_EXA_SEARCH_TYPE",
+    )
+    exa_num_results: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        alias="NATSUHAT_EXA_NUM_RESULTS",
+    )
+    postman_api_key: str | None = Field(
+        default=None,
+        alias="POSTMAN_API_KEY",
+        repr=False,
+    )
+
+
+class Settings(BaseSettings):
+    model_config = _BASE_CONFIG
+
+    llm: LlmSettings = Field(default_factory=LlmSettings)
+    dedupe: DedupeSettings = Field(default_factory=DedupeSettings)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
+    integrations: IntegrationSettings = Field(default_factory=IntegrationSettings)

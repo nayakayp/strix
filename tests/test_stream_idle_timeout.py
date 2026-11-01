@@ -21,10 +21,10 @@ from agents.models.interface import Model, ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
-from strix.config import loader
-from strix.config.loader import load_settings
-from strix.config.models import StrixProvider, _TurnGuardModel, _with_timeouts
-from strix.llm import request_log
+from natsuhat.config import loader
+from natsuhat.config.loader import load_settings
+from natsuhat.config.models import NatsuhatProvider, _TurnGuardModel, _with_timeouts
+from natsuhat.llm import request_log
 
 
 if TYPE_CHECKING:
@@ -140,7 +140,7 @@ async def test_stalled_stream_is_abandoned_by_the_watchdog(stalling_gateway: str
         (
             "stream_idle_timeout",
             "Relace",
-            "attempt cancelled before the reply was consumed: strix:stream_idle_timeout",
+            "attempt cancelled before the reply was consumed: natsuhat:stream_idle_timeout",
         )
     ]
 
@@ -179,7 +179,7 @@ async def test_first_event_and_whole_stream_are_bounded() -> None:
 @pytest.fixture
 def _reset_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key in (
-        "STRIX_LLM",
+        "NATSUHAT_LLM",
         "LLM_DISABLE_STREAMING",
         "LLM_STREAM_IDLE_TIMEOUT",
         "LLM_STREAM_FIRST_EVENT_TIMEOUT",
@@ -202,13 +202,13 @@ class _DummyModel(Model):
 def test_idle_timeout_is_configurable(
     monkeypatch: pytest.MonkeyPatch, _reset_settings: None
 ) -> None:
-    monkeypatch.setattr("strix.config.models.MultiProvider.get_model", lambda *_: _DummyModel())
+    monkeypatch.setattr("natsuhat.config.models.MultiProvider.get_model", lambda *_: _DummyModel())
     monkeypatch.setenv("LLM_STREAM_IDLE_TIMEOUT", "45")
     monkeypatch.setenv("LLM_STREAM_FIRST_EVENT_TIMEOUT", "30")
     monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT", "400")
     load_settings()
 
-    model = StrixProvider().get_model("openai/gpt-4o-mini")
+    model = NatsuhatProvider().get_model("openai/gpt-4o-mini")
     assert isinstance(model, _TurnGuardModel)
     assert model._stream_idle_timeout == 45
     assert model._first_event_timeout == 30
@@ -220,11 +220,11 @@ def test_idle_timeout_is_off_without_streaming(
 ) -> None:
     # LLM_DISABLE_STREAMING turns the whole request into one event, so an idle
     # gap would just be the request duration — the request timeout bounds that.
-    monkeypatch.setattr("strix.config.models.MultiProvider.get_model", lambda *_: _DummyModel())
+    monkeypatch.setattr("natsuhat.config.models.MultiProvider.get_model", lambda *_: _DummyModel())
     monkeypatch.setenv("LLM_STREAM_IDLE_TIMEOUT", "45")
     monkeypatch.setenv("LLM_DISABLE_STREAMING", "true")
     load_settings()
 
-    model = StrixProvider().get_model("openai/gpt-4o-mini")
+    model = NatsuhatProvider().get_model("openai/gpt-4o-mini")
     assert isinstance(model, _TurnGuardModel)
     assert model._stream_idle_timeout is model._first_event_timeout is model._total_timeout is None

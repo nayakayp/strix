@@ -1,7 +1,7 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "maple",
-  "name": "Strix",
+  "name": "Natsuhat",
   "colors": {
     "primary": "#000000",
     "light": "#ffffff",
@@ -72,48 +72,24 @@
             ]
           }
         ]
-      },
-      {
-        "tab": "Cloud",
-        "groups": [
-          {
-            "group": "Strix Cloud",
-            "pages": [
-              "cloud/overview",
-              "cloud/cli"
-            ]
-          }
-        ]
       }
     ],
     "global": {
       "anchors": [
         {
           "anchor": "GitHub",
-          "href": "https://github.com/usestrix/strix",
+          "href": "https://github.com/nayakayp/natsuhat",
           "icon": "github"
-        },
-        {
-          "anchor": "Discord",
-          "href": "https://discord.gg/strix-ai",
-          "icon": "discord"
         }
       ]
     }
   },
   "navbar": {
-    "links": [],
-    "primary": {
-      "type": "button",
-      "label": "Try Strix Cloud",
-      "href": "https://app.strix.ai"
-    }
+    "links": []
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/strix_ai",
-      "github": "https://github.com/usestrix",
-      "discord": "https://discord.gg/strix-ai"
+      "github": "https://github.com/nayakayp/natsuhat"
     }
   },
   "fonts": {

@@ -1,6 +1,6 @@
 .PHONY: help install dev-install format lint format-check lint-check type-check security check-all clean pre-commit setup-dev dev viewer viewer-dev wheel tui-build tui-test tui-lint
 
-TUI_BINARY := build/sidecar/strix-tui$(if $(filter Windows_NT,$(OS)),.exe)
+TUI_BINARY := build/sidecar/natsuhat-tui$(if $(filter Windows_NT,$(OS)),.exe)
 
 help:
 	@echo "Available commands:"
@@ -56,14 +56,14 @@ lint-check:
 
 type-check:
 	@echo "🔍 Type checking with mypy..."
-	uv run mypy strix/
+	uv run mypy natsuhat/
 	@echo "🔍 Type checking with pyright..."
-	uv run pyright strix/
+	uv run pyright natsuhat/
 	@echo "✅ Type checking complete!"
 
 security:
 	@echo "🔒 Running security checks with bandit..."
-	uv run bandit -r strix/ -c pyproject.toml
+	uv run bandit -r natsuhat/ -c pyproject.toml
 	@echo "✅ Security checks complete!"
 
 check-all: format-check lint-check type-check security
@@ -84,8 +84,8 @@ clean:
 
 viewer:
 	@echo "🖥️  Building the local-viewer SPA..."
-	cd strix/interface/viewer/frontend && npm ci && npm run build
-	@echo "✅ Viewer built to strix/interface/viewer/static/ (commit the changes)."
+	cd natsuhat/interface/viewer/frontend && npm ci && npm run build
+	@echo "✅ Viewer built to natsuhat/interface/viewer/static/ (commit the changes)."
 
 viewer-dev:
 	uv run --frozen python scripts/viewer_dev.py
@@ -98,10 +98,10 @@ dev: format lint type-check
 
 tui-build:
 	mkdir -p build/sidecar
-	cd strix/interface/tui && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../../../$(TUI_BINARY) ./cmd/strix-tui
+	cd natsuhat/interface/tui && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../../../$(TUI_BINARY) ./cmd/natsuhat-tui
 
 tui-test:
-	cd strix/interface/tui && go test -race ./...
+	cd natsuhat/interface/tui && go test -race ./...
 
 tui-lint:
-	cd strix/interface/tui && test -z "$$(gofmt -l .)" && go vet ./...
+	cd natsuhat/interface/tui && test -z "$$(gofmt -l .)" && go vet ./...

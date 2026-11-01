@@ -15,10 +15,10 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
-from strix.interface.viewer import jobs, llm_settings
-from strix.interface.viewer.llm_settings import LlmProfiles
-from strix.interface.viewer.server import SESSION_COOKIE_PREFIX, serve
-from strix.utils.secret_files import dashboard_profiles_path, dashboard_secrets_dir
+from natsuhat.interface.viewer import jobs, llm_settings
+from natsuhat.interface.viewer.llm_settings import LlmProfiles
+from natsuhat.interface.viewer.server import SESSION_COOKIE_PREFIX, serve
+from natsuhat.utils.secret_files import dashboard_profiles_path, dashboard_secrets_dir
 
 
 if TYPE_CHECKING:
@@ -40,8 +40,8 @@ from pathlib import Path
 directory = Path(sys.argv[1])
 job = json.loads((directory / 'job.json').read_text())
 print('Synthetic child: ' + job['target'], flush=True)
-if 'STRIX_DASHBOARD_LLM' in os.environ:
-    snapshot = json.loads(os.environ['STRIX_DASHBOARD_LLM'])
+if 'NATSUHAT_DASHBOARD_LLM' in os.environ:
+    snapshot = json.loads(os.environ['NATSUHAT_DASHBOARD_LLM'])
     print('LLM configuration: ' + json.dumps({
         'model': snapshot['model'],
         'input': snapshot['input_cost_per_mtok'],
@@ -109,7 +109,7 @@ def settled(manager: jobs.ScanJobManager, name: str) -> dict[str, Any]:
 @pytest.mark.usefixtures("child_process")
 def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
     httpd, url, token = serve(
-        tmp_path / "strix_runs" / ".dashboard", manage_scans=True, open_browser=False
+        tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
     )
     cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
     try:
@@ -163,7 +163,9 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
         name = job["id"]
         assert job["max_budget_usd"] == -1
         assert (
-            json.loads((tmp_path / "strix_runs" / name / "job.json").read_text())["max_budget_usd"]
+            json.loads((tmp_path / "natsuhat_runs" / name / "job.json").read_text())[
+                "max_budget_usd"
+            ]
             == -1
         )
         assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["id"] == name
@@ -194,7 +196,7 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
 def test_job_exit_history_and_logs(
     tmp_path: Path, exit_code: int, has_report: bool, status: str
 ) -> None:
-    base = tmp_path / "strix_runs"
+    base = tmp_path / "natsuhat_runs"
     manager = jobs.ScanJobManager(base)
     try:
         phase = "exit" if has_report else "usage"
@@ -226,7 +228,7 @@ def test_job_exit_history_and_logs(
 def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
     tmp_path: Path, budget: float
 ) -> None:
-    base = tmp_path / "strix_runs"
+    base = tmp_path / "natsuhat_runs"
     instruction = "Test object ownership.\nDo not test payments."
     manager = jobs.ScanJobManager(base)
     try:
@@ -281,7 +283,7 @@ def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
 
 @pytest.mark.usefixtures("child_process")
 def test_job_shutdown_stops_child_and_owner_lock(tmp_path: Path) -> None:
-    base = tmp_path / "strix_runs"
+    base = tmp_path / "natsuhat_runs"
     manager = jobs.ScanJobManager(base)
     try:
         with pytest.raises(jobs.JobError, match="already manages"):
@@ -300,7 +302,7 @@ def test_job_shutdown_stops_child_and_owner_lock(tmp_path: Path) -> None:
 
 
 def test_job_management_disabled_by_default(tmp_path: Path) -> None:
-    httpd, url, token = serve(tmp_path / "strix_runs" / ".dashboard", open_browser=False)
+    httpd, url, token = serve(tmp_path / "natsuhat_runs" / ".dashboard", open_browser=False)
     cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
     try:
         assert request(url, "/api/capabilities", cookie)[1]["can_manage_scans"] is False
@@ -316,9 +318,9 @@ def test_job_management_disabled_by_default(tmp_path: Path) -> None:
 def test_managing_viewer_starts_before_first_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    viewer_cli = importlib.import_module("strix.interface.viewer.cli")
+    viewer_cli = importlib.import_module("natsuhat.interface.viewer.cli")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("STRIX_TELEMETRY", "false")
+    monkeypatch.setenv("NATSUHAT_TELEMETRY", "false")
 
     def interrupt(_seconds: float) -> None:
         raise KeyboardInterrupt
@@ -326,9 +328,9 @@ def test_managing_viewer_starts_before_first_run(
     monkeypatch.setattr(viewer_cli.time, "sleep", interrupt)
     viewer_cli.run_view(["--manage-scans", "--no-open"])
     assert "Serving the local scan dashboard" in capsys.readouterr().out
-    assert list((tmp_path / "strix_runs").glob("*/run.json")) == []
+    assert list((tmp_path / "natsuhat_runs").glob("*/run.json")) == []
     # Shutdown released ownership, even though there was no run to open.
-    manager = jobs.ScanJobManager(tmp_path / "strix_runs")
+    manager = jobs.ScanJobManager(tmp_path / "natsuhat_runs")
     manager.close()
 
 
@@ -343,17 +345,17 @@ def test_job_worker_preserves_cli_options_and_run_identity(
     engine_budget: float | None,
     rates: tuple[float | None, float | None],
 ) -> None:
-    cli_main = importlib.import_module("strix.interface.main")
-    cli = importlib.import_module("strix.interface.cli")
-    loader = importlib.import_module("strix.config.loader")
-    worker = importlib.import_module("strix.interface.viewer.job_runner")
+    cli_main = importlib.import_module("natsuhat.interface.main")
+    cli = importlib.import_module("natsuhat.interface.cli")
+    loader = importlib.import_module("natsuhat.config.loader")
+    worker = importlib.import_module("natsuhat.interface.viewer.job_runner")
     config = tmp_path / "cli-config.json"
-    config.write_text('{"env": {"STRIX_LLM_INPUT_COST_PER_MTOK": "99"}}')
+    config.write_text('{"env": {"NATSUHAT_LLM_INPUT_COST_PER_MTOK": "99"}}')
     monkeypatch.setattr(loader, "_DEFAULT_PATH", config)
     monkeypatch.setattr(loader, "_override", None)
     monkeypatch.setattr(loader, "_cached", None)
     monkeypatch.setenv(
-        "STRIX_DASHBOARD_LLM",
+        "NATSUHAT_DASHBOARD_LLM",
         json.dumps(
             {
                 "model": "openai/test-model",
@@ -366,7 +368,7 @@ def test_job_worker_preserves_cli_options_and_run_identity(
         ),
     )
     name = "local-worker-test"
-    directory = tmp_path / "strix_runs" / name
+    directory = tmp_path / "natsuhat_runs" / name
     directory.mkdir(parents=True)
     (directory / "job.json").write_text(
         json.dumps({**REQUEST, "id": name, "max_budget_usd": budget})
@@ -401,7 +403,7 @@ def test_job_worker_preserves_cli_options_and_run_identity(
     monkeypatch.setattr(cli_main, "warm_up_llm", no_warmup)
     monkeypatch.setattr(cli_main, "display_completion_message", lambda *_: None)
     monkeypatch.setattr(cli, "run_cli", finish)
-    monkeypatch.setattr("strix.report.state.get_global_report_state", lambda: None)
+    monkeypatch.setattr("natsuhat.report.state.get_global_report_state", lambda: None)
     monkeypatch.setattr(sys, "argv", ["worker"])
     worker.run_job(directory)
     record = json.loads((directory / "run.json").read_text())
@@ -409,7 +411,7 @@ def test_job_worker_preserves_cli_options_and_run_identity(
     assert record["scan_mode"] == "standard"
     assert record["targets_info"][0]["original"] == REQUEST["target"]
     assert record["instruction"] == "Focus on object ownership."
-    assert config.read_text() == '{"env": {"STRIX_LLM_INPUT_COST_PER_MTOK": "99"}}'
+    assert config.read_text() == '{"env": {"NATSUHAT_LLM_INPUT_COST_PER_MTOK": "99"}}'
 
 
 @pytest.mark.usefixtures("child_process")
@@ -417,7 +419,7 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
     tmp_path: Path,
 ) -> None:
     httpd, url, token = serve(
-        tmp_path / "strix_runs" / ".dashboard", manage_scans=True, open_browser=False
+        tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
     )
     cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
     provider = {
@@ -462,7 +464,7 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
         identifier = saved["id"]
         file = dashboard_profiles_path(tmp_path)
         assert not file.is_relative_to(tmp_path)
-        assert not (tmp_path / ".strix" / "llm-providers.json").exists()
+        assert not (tmp_path / ".natsuhat" / "llm-providers.json").exists()
         assert dashboard_secrets_dir().stat().st_mode & 0o777 == 0o700
         assert file.parent.stat().st_mode & 0o777 == 0o700
         assert file.stat().st_mode & 0o777 == 0o600
@@ -479,7 +481,7 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
         assert code == 202
         assert result["job"]["llm_model"] == "openai/team/model-a"
         assert "synthetic-profile-key" not in json.dumps(result)
-        metadata = (tmp_path / "strix_runs" / result["job"]["id"] / "job.json").read_text()
+        metadata = (tmp_path / "natsuhat_runs" / result["job"]["id"] / "job.json").read_text()
         assert "synthetic-profile-key" not in metadata
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -523,7 +525,7 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
         httpd.shutdown()
         httpd.server_close()
     httpd, url, token = serve(
-        tmp_path / "strix_runs" / ".dashboard", manage_scans=True, open_browser=False
+        tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
     )
     cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
     try:
@@ -650,7 +652,7 @@ def test_discovery_errors_do_not_disclose_credentials_or_erase_model(
 def test_profiles_migrate_without_losing_or_overwriting_settings(
     tmp_path: Path, destination: str
 ) -> None:
-    legacy = tmp_path / ".strix" / "llm-providers.json"
+    legacy = tmp_path / ".natsuhat" / "llm-providers.json"
     legacy.parent.mkdir()
     data = {
         "selected_id": "b" * 32,
@@ -681,14 +683,14 @@ def test_profiles_migrate_without_losing_or_overwriting_settings(
 
     if destination == "conflicting":
         with pytest.raises(jobs.JobError, match="Conflicting"):
-            jobs.ScanJobManager(tmp_path / "strix_runs")
+            jobs.ScanJobManager(tmp_path / "natsuhat_runs")
         assert json.loads(host.read_text()) == existing
         assert json.loads(legacy.read_text()) == data
         assert temporary.read_text() == "synthetic-stale-key"
         # Reconciliation must be retryable: failed startup releases the owner lock.
         host.unlink()
 
-    manager = jobs.ScanJobManager(tmp_path / "strix_runs")
+    manager = jobs.ScanJobManager(tmp_path / "natsuhat_runs")
     try:
         assert json.loads(host.read_text()) == data
         assert not legacy.exists()
@@ -702,8 +704,8 @@ def test_profiles_migrate_without_losing_or_overwriting_settings(
         manager.close()
     alias = tmp_path.parent / f"{tmp_path.name}-alias"
     alias.symlink_to(tmp_path, target_is_directory=True)
-    restored = jobs.ScanJobManager(alias / "strix_runs")
-    other = jobs.ScanJobManager(tmp_path / "other-workspace" / "strix_runs")
+    restored = jobs.ScanJobManager(alias / "natsuhat_runs")
+    other = jobs.ScanJobManager(tmp_path / "other-workspace" / "natsuhat_runs")
     try:
         assert restored.llm_profiles.public()["selected_id"] == "b" * 32
         assert other.llm_profiles.public() == {"selected_id": None, "providers": []}
@@ -715,7 +717,7 @@ def test_profiles_migrate_without_losing_or_overwriting_settings(
 def test_failed_profile_migration_retains_legacy_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    legacy = tmp_path / ".strix" / "llm-providers.json"
+    legacy = tmp_path / ".natsuhat" / "llm-providers.json"
     legacy.parent.mkdir()
     original = '{"providers": [], "selected_id": null}'
     legacy.write_text(original)
@@ -726,10 +728,10 @@ def test_failed_profile_migration_retains_legacy_copy(
     with monkeypatch.context() as patch:
         patch.setattr(llm_settings, "write_secret_text", disk_full)
         with pytest.raises(OSError, match="disk full"):
-            jobs.ScanJobManager(tmp_path / "strix_runs")
+            jobs.ScanJobManager(tmp_path / "natsuhat_runs")
     assert legacy.read_text() == original
     assert not dashboard_profiles_path(tmp_path).exists()
-    manager = jobs.ScanJobManager(tmp_path / "strix_runs")
+    manager = jobs.ScanJobManager(tmp_path / "natsuhat_runs")
     manager.close()
     assert not legacy.exists()
     assert json.loads(dashboard_profiles_path(tmp_path).read_text()) == json.loads(original)

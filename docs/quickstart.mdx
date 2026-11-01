@@ -1,6 +1,6 @@
 ---
 title: "Quick Start"
-description: "Install Strix and run your first security scan"
+description: "Install Natsuhat and run your first security scan"
 ---
 
 ## Prerequisites
@@ -10,18 +10,12 @@ description: "Install Strix and run your first security scan"
 
 ## Installation
 
-<Tabs>
-  <Tab title="curl">
-    ```bash
-    curl -sSL https://strix.ai/install | bash
-    ```
-  </Tab>
-  <Tab title="pipx">
-    ```bash
-    pipx install strix-agent
-    ```
-  </Tab>
-</Tabs>
+From the repository checkout:
+
+```bash
+uv tool install .
+bash scripts/docker.sh local
+```
 
 ## Configuration
 
@@ -29,12 +23,12 @@ Set your LLM provider. We recommend GLM-5.3 through [Vercel AI Gateway](/llm-pro
 
 <CodeGroup>
 ```bash Vercel AI Gateway
-export STRIX_LLM="vercel_ai_gateway/zai/glm-5.3"
+export NATSUHAT_LLM="vercel_ai_gateway/zai/glm-5.3"
 export LLM_API_KEY="your-api-key"
 ```
 
 ```bash OpenRouter
-export STRIX_LLM="openrouter/z-ai/glm-5.3"
+export NATSUHAT_LLM="openrouter/z-ai/glm-5.3"
 export LLM_API_KEY="your-api-key"
 ```
 </CodeGroup>
@@ -46,32 +40,32 @@ For best results, use `zai/glm-5.3`, `deepseek/deepseek-v4.1-flash-1017`, `anthr
 ## Run Your First Scan
 
 ```bash
-strix --target ./your-app
+natsuhat --target ./your-app
 ```
 
 <Note>
-First run pulls the Docker sandbox image automatically. Results are saved to `strix_runs/<run-name>`.
+Build the Docker sandbox image locally before the first scan. Results are saved to `natsuhat_runs/<run-name>`.
 </Note>
 
 ## Target Types
 
-Strix accepts multiple target types:
+Natsuhat accepts multiple target types:
 
 ```bash
 # Local codebase
-strix --target ./app-directory
+natsuhat --target ./app-directory
 
 # GitHub repository
-strix --target https://github.com/org/repo
+natsuhat --target https://github.com/org/repo
 
 # Live web application
-strix --target https://your-app.com
+natsuhat --target https://your-app.com
 
 # Multiple targets (white-box testing)
-strix -t https://github.com/org/repo -t https://your-app.com
+natsuhat -t https://github.com/org/repo -t https://your-app.com
 
 # Targets from a file, one target per non-empty, non-comment line
-strix --target-list ./targets.txt
+natsuhat --target-list ./targets.txt
 ```
 
 ## Next Steps

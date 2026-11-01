@@ -15,9 +15,8 @@ from urllib.parse import urlsplit
 
 from rich.console import Console
 
-from strix.core.paths import latest_run_dir, runs_base_dir
-from strix.interface.viewer import auth
-from strix.interface.viewer.server import SESSION_COOKIE_PREFIX, serve
+from natsuhat.core.paths import latest_run_dir, runs_base_dir
+from natsuhat.interface.viewer.server import SESSION_COOKIE_PREFIX, serve
 
 
 def main() -> None:
@@ -30,7 +29,7 @@ def main() -> None:
     args = parser.parse_args()
     # Supervised service stops must clean up the child process and demo directory too.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    os.environ["STRIX_TELEMETRY"] = "false"
+    os.environ["NATSUHAT_TELEMETRY"] = "false"
     if args.manage_scans:
         if os.environ.get("AMP_ORB") == "1":
             _ensure_orb_docker()
@@ -38,7 +37,7 @@ def main() -> None:
         return
 
     # Never write demo records among real scan results or start a scan.
-    with TemporaryDirectory(prefix="strix-viewer-demo-") as temporary:
+    with TemporaryDirectory(prefix="natsuhat-viewer-demo-") as temporary:
         run_dir = Path(temporary) / "demo-ui-only"
         state_dir = run_dir / ".state"
         state_dir.mkdir(parents=True)
@@ -119,7 +118,6 @@ def main() -> None:
             modified = (run_dir / "run.json").stat().st_mtime - days_ago * 86400
             os.utime(previous / "run.json", (modified, modified))
 
-        auth.AUTH_PATH = Path(temporary) / "viewer-auth.json"
         _serve(run_dir)
 
 
@@ -164,19 +162,19 @@ def _ensure_orb_docker() -> None:
 
 def _serve(run_dir: Path, *, manage_scans: bool = False) -> None:
     root = Path(__file__).resolve().parents[1]
-    frontend = root / "strix" / "interface" / "viewer" / "frontend"
+    frontend = root / "natsuhat" / "interface" / "viewer" / "frontend"
     npm = shutil.which("npm")
     if npm is None or not (frontend / "node_modules").is_dir():
         raise SystemExit(
-            "Install Node.js 24 and run: npm --prefix strix/interface/viewer/frontend ci"
+            "Install Node.js 24 and run: npm --prefix natsuhat/interface/viewer/frontend ci"
         )
     httpd, backend_url, token = serve(run_dir, open_browser=False, manage_scans=manage_scans)
     try:
         env = os.environ.copy()
-        env["STRIX_VIEWER_DEV_BACKEND"] = backend_url
+        env["NATSUHAT_VIEWER_DEV_BACKEND"] = backend_url
         # Only the Vite server receives the capability; it never enters browser JS or logs.
         port = httpd.server_address[1]
-        env["STRIX_VIEWER_DEV_COOKIE"] = f"{SESSION_COOKIE_PREFIX}_{port}={token}"
+        env["NATSUHAT_VIEWER_DEV_COOKIE"] = f"{SESSION_COOKIE_PREFIX}_{port}={token}"
         if public_url := env.get("PUBLIC_URL"):
             env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] = urlsplit(public_url).hostname or ""
         Console().print(

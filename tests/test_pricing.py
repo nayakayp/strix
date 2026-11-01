@@ -9,10 +9,10 @@ import pytest
 from agents.usage import Usage
 from pydantic import ValidationError
 
-from strix.config import loader
-from strix.config.settings import LlmSettings
-from strix.report.pricing import resolve_litellm_model
-from strix.report.usage import LLMUsageLedger
+from natsuhat.config import loader
+from natsuhat.config.settings import LlmSettings
+from natsuhat.report.pricing import resolve_litellm_model
+from natsuhat.report.usage import LLMUsageLedger
 
 
 if TYPE_CHECKING:
@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
 
 PRICE_ENV = (
-    "STRIX_LLM_INPUT_COST_PER_MTOK",
-    "STRIX_LLM_OUTPUT_COST_PER_MTOK",
-    "STRIX_LLM_CACHED_INPUT_COST_PER_MTOK",
+    "NATSUHAT_LLM_INPUT_COST_PER_MTOK",
+    "NATSUHAT_LLM_OUTPUT_COST_PER_MTOK",
+    "NATSUHAT_LLM_CACHED_INPUT_COST_PER_MTOK",
 )
 
 
@@ -30,7 +30,7 @@ PRICE_ENV = (
 def _isolated_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in PRICE_ENV:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("STRIX_LLM", "gateway/unpriced-model")
+    monkeypatch.setenv("NATSUHAT_LLM", "gateway/unpriced-model")
     monkeypatch.setattr(loader, "_override", tmp_path / "missing.json")
     monkeypatch.setattr(loader, "_cached", None)
 
@@ -107,8 +107,8 @@ def test_unpriced_model_without_manual_rates_costs_zero() -> None:
 def test_manual_rates_price_usage_and_override_observed_cost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STRIX_LLM_INPUT_COST_PER_MTOK", "2")
-    monkeypatch.setenv("STRIX_LLM_OUTPUT_COST_PER_MTOK", "8")
+    monkeypatch.setenv("NATSUHAT_LLM_INPUT_COST_PER_MTOK", "2")
+    monkeypatch.setenv("NATSUHAT_LLM_OUTPUT_COST_PER_MTOK", "8")
     ledger = LLMUsageLedger()
 
     ledger.record(agent_id="a", usage=_usage(1000, 200), model="gateway/unpriced-model")
@@ -124,8 +124,8 @@ def test_manual_rates_from_config_file(tmp_path: Path, monkeypatch: pytest.Monke
         json.dumps(
             {
                 "env": {
-                    "STRIX_LLM_INPUT_COST_PER_MTOK": "2",
-                    "STRIX_LLM_OUTPUT_COST_PER_MTOK": "8",
+                    "NATSUHAT_LLM_INPUT_COST_PER_MTOK": "2",
+                    "NATSUHAT_LLM_OUTPUT_COST_PER_MTOK": "8",
                 }
             }
         ),
@@ -140,8 +140,8 @@ def test_manual_rates_from_config_file(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_manual_rates_only_price_the_configured_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_LLM_INPUT_COST_PER_MTOK", "2")
-    monkeypatch.setenv("STRIX_LLM_OUTPUT_COST_PER_MTOK", "8")
+    monkeypatch.setenv("NATSUHAT_LLM_INPUT_COST_PER_MTOK", "2")
+    monkeypatch.setenv("NATSUHAT_LLM_OUTPUT_COST_PER_MTOK", "8")
     ledger = LLMUsageLedger()
 
     ledger.record(agent_id="a", usage=_usage(1000, 200), model="gateway/unpriced-model")
@@ -157,8 +157,8 @@ def test_manual_rates_only_price_the_configured_model(monkeypatch: pytest.Monkey
 
 
 def test_cached_tokens_fall_back_to_input_rate(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_LLM_INPUT_COST_PER_MTOK", "5")
-    monkeypatch.setenv("STRIX_LLM_OUTPUT_COST_PER_MTOK", "7")
+    monkeypatch.setenv("NATSUHAT_LLM_INPUT_COST_PER_MTOK", "5")
+    monkeypatch.setenv("NATSUHAT_LLM_OUTPUT_COST_PER_MTOK", "7")
     ledger = LLMUsageLedger()
 
     ledger.record(
@@ -171,8 +171,8 @@ def test_cached_tokens_fall_back_to_input_rate(monkeypatch: pytest.MonkeyPatch) 
 def test_hydrated_usage_uses_configured_rates_not_persisted_cost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STRIX_LLM_INPUT_COST_PER_MTOK", "2")
-    monkeypatch.setenv("STRIX_LLM_OUTPUT_COST_PER_MTOK", "8")
+    monkeypatch.setenv("NATSUHAT_LLM_INPUT_COST_PER_MTOK", "2")
+    monkeypatch.setenv("NATSUHAT_LLM_OUTPUT_COST_PER_MTOK", "8")
     original = LLMUsageLedger()
     original.record(agent_id="a", usage=_usage(1000, 200), model="gateway/unpriced-model")
     persisted = original.to_record()
@@ -187,13 +187,13 @@ def test_hydrated_usage_uses_configured_rates_not_persisted_cost(
 
 @pytest.mark.parametrize("value", ["invalid", "-1", "nan", "inf"])
 def test_invalid_manual_rate_is_rejected(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_LLM_INPUT_COST_PER_MTOK", value)
+    monkeypatch.setenv("NATSUHAT_LLM_INPUT_COST_PER_MTOK", value)
     with pytest.raises(ValidationError):
         LlmSettings()
 
 
 def test_zero_cost_overrides_manual_rates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRIX_LLM_INPUT_COST_PER_MTOK", "10")
+    monkeypatch.setenv("NATSUHAT_LLM_INPUT_COST_PER_MTOK", "10")
     ledger = LLMUsageLedger()
     ledger.zero_cost = True
 

@@ -9,8 +9,8 @@ from typing import Any, cast
 import pytest
 from agents.tool import CustomTool, FunctionTool
 
-from strix.agents import factory
-from strix.config import load_settings
+from natsuhat.agents import factory
+from natsuhat.config import load_settings
 
 
 def _capturing_exec_tool(captured: dict[str, str]) -> FunctionTool:
@@ -199,17 +199,17 @@ async def test_chat_completions_filesystem_custom_tool_becomes_function_tool() -
 
 
 def test_function_tools_are_result_bounded() -> None:
-    agent = factory.build_strix_agent(is_root=True)
+    agent = factory.build_natsuhat_agent(is_root=True)
     by_name = {t.name: t for t in agent.tools}
 
-    assert getattr(by_name["think"], "_strix_bounded", False) is True
+    assert getattr(by_name["think"], "_natsuhat_bounded", False) is True
 
 
 @pytest.mark.parametrize(("supports_images", "has_view_image"), [(True, True), (False, False)])
 def test_view_image_is_left_out_for_text_only_models(
     supports_images: bool, has_view_image: bool
 ) -> None:
-    agent = factory.build_strix_agent(is_root=True, supports_images=supports_images)
+    agent = factory.build_natsuhat_agent(is_root=True, supports_images=supports_images)
     filesystem = agent.capabilities[0]
     filesystem.bind(cast("Any", object()))
 

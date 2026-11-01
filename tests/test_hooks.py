@@ -9,16 +9,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 from agents.usage import Usage
 
-from strix.config import loader
-from strix.core.agents import AgentCoordinator
-from strix.core.hooks import (
+from natsuhat.config import loader
+from natsuhat.core.agents import AgentCoordinator
+from natsuhat.core.hooks import (
     BudgetExceededError,
     BudgetPausedError,
     ReportUsageHooks,
     SubagentBudgetReservedError,
     recomputed_budget_flags,
 )
-from strix.report.usage import LLMUsageLedger
+from natsuhat.report.usage import LLMUsageLedger
 
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ def _make_warn_context(
 async def test_no_budget_never_raises() -> None:
     hooks = _make_hooks(None)
     state = _make_report_state(9999.0)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_end(_make_context(), MagicMock(), MagicMock())
 
 
@@ -67,7 +67,7 @@ async def test_no_budget_never_raises() -> None:
 async def test_under_budget_does_not_raise() -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(9.99)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_end(_make_context(), MagicMock(), MagicMock())
 
 
@@ -76,7 +76,7 @@ async def test_at_budget_raises() -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(10.0)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetExceededError),
     ):
         await hooks.on_llm_end(_make_context(), MagicMock(), MagicMock())
@@ -87,7 +87,7 @@ async def test_over_budget_raises() -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(10.01)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetExceededError),
     ):
         await hooks.on_llm_end(_make_context(), MagicMock(), MagicMock())
@@ -97,10 +97,10 @@ async def test_over_budget_raises() -> None:
 async def test_manual_rates_make_unpriced_model_trip_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("STRIX_LLM", "test-model")
-    monkeypatch.setenv("STRIX_LLM_INPUT_COST_PER_MTOK", "10")
-    monkeypatch.delenv("STRIX_LLM_OUTPUT_COST_PER_MTOK", raising=False)
-    monkeypatch.delenv("STRIX_LLM_CACHED_INPUT_COST_PER_MTOK", raising=False)
+    monkeypatch.setenv("NATSUHAT_LLM", "test-model")
+    monkeypatch.setenv("NATSUHAT_LLM_INPUT_COST_PER_MTOK", "10")
+    monkeypatch.delenv("NATSUHAT_LLM_OUTPUT_COST_PER_MTOK", raising=False)
+    monkeypatch.delenv("NATSUHAT_LLM_CACHED_INPUT_COST_PER_MTOK", raising=False)
     monkeypatch.setattr(loader, "_override", tmp_path / "missing.json")
     monkeypatch.setattr(loader, "_cached", None)
     usage = Usage()
@@ -119,7 +119,7 @@ async def test_manual_rates_make_unpriced_model_trip_budget(
     hooks = _make_hooks(0.005)
     response: Any = SimpleNamespace(usage=usage)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=ReportState()),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=ReportState()),
         pytest.raises(BudgetExceededError),
     ):
         await hooks.on_llm_end(_make_context(), MagicMock(), response)
@@ -132,7 +132,7 @@ async def test_budget_check_uses_live_cost_accessor() -> None:
     hooks = _make_hooks(5.0)
     state = _make_report_state(6.0)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetExceededError),
     ):
         await hooks.on_llm_end(_make_context(), MagicMock(), MagicMock())
@@ -144,7 +144,7 @@ async def test_budget_check_uses_live_cost_accessor() -> None:
 async def test_error_message_includes_amounts() -> None:
     hooks = _make_hooks(5.0)
     state = _make_report_state(7.1234)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         with pytest.raises(BudgetExceededError, match=r"\$5\.00") as exc_info:
             await hooks.on_llm_end(_make_context(), MagicMock(), MagicMock())
         assert "7.1234" in str(exc_info.value)
@@ -155,7 +155,7 @@ async def test_subagent_stops_at_reserve() -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(9.0)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(SubagentBudgetReservedError),
     ):
         await hooks.on_llm_end(_make_context(parent_id="root-1"), MagicMock(), MagicMock())
@@ -165,7 +165,7 @@ async def test_subagent_stops_at_reserve() -> None:
 async def test_subagent_below_reserve_does_not_raise() -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(8.99)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_end(_make_context(parent_id="root-1"), MagicMock(), MagicMock())
 
 
@@ -174,7 +174,7 @@ async def test_subagent_overshoot_to_full_budget_triggers_scan_wide_stop() -> No
     hooks = _make_hooks(10.0)
     state = _make_report_state(10.5)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetExceededError),
     ):
         await hooks.on_llm_end(_make_context(parent_id="root-1"), MagicMock(), MagicMock())
@@ -184,7 +184,7 @@ async def test_subagent_overshoot_to_full_budget_triggers_scan_wide_stop() -> No
 async def test_root_keeps_running_inside_reserve() -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(9.5)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_end(_make_context(parent_id=None), MagicMock(), MagicMock())
 
 
@@ -193,7 +193,7 @@ async def test_root_hard_stop_stays_at_full_budget() -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(10.0)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetExceededError),
     ):
         await hooks.on_llm_end(_make_context(parent_id=None), MagicMock(), MagicMock())
@@ -205,7 +205,7 @@ async def test_budget_warning_mentions_reserve() -> None:
     state = _make_report_state(7.5)
     root_items: list[Any] = []
     sub_items: list[Any] = []
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_start(
             _make_warn_context(requests=0, parent_id=None), MagicMock(), None, root_items
         )
@@ -223,7 +223,7 @@ async def test_subagent_critical_budget_warning_reachable_before_reserve() -> No
     state = _make_report_state(8.6)
     sub_items: list[Any] = []
     root_items: list[Any] = []
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_start(
             _make_warn_context(requests=0, parent_id="root-1"), MagicMock(), None, sub_items
         )
@@ -262,7 +262,7 @@ async def test_budget_enforcement_decision_table(
 ) -> None:
     hooks = _make_hooks(10.0)
     state = _make_report_state(cost)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         if expected is None:
             await hooks.on_llm_end(_make_context(parent_id=parent_id), MagicMock(), MagicMock())
         else:
@@ -274,7 +274,7 @@ async def test_budget_enforcement_decision_table(
 @pytest.mark.asyncio
 async def test_no_raise_when_report_state_none() -> None:
     hooks = _make_hooks(1.0)
-    with patch("strix.core.hooks.get_global_report_state", return_value=None):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=None):
         # Should return early without raising, even with budget set
         await hooks.on_llm_end(_make_context(), MagicMock(), MagicMock())
 
@@ -361,7 +361,7 @@ async def test_budget_warning_root_directive_distinct_from_subagent() -> None:
 
     root_items: list[Any] = []
     sub_items: list[Any] = []
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_start(
             _make_warn_context(requests=0, parent_id=None), MagicMock(), None, root_items
         )
@@ -422,7 +422,7 @@ async def test_no_budget_warning_below_first_band() -> None:
     hooks = ReportUsageHooks(model="test-model", max_budget_usd=10.0)
     state = _make_report_state(6.9)
     items: list[Any] = []
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_start(_make_warn_context(requests=0), MagicMock(), None, items)
     assert items == []
 
@@ -432,7 +432,7 @@ async def test_budget_warning_broadcast_content() -> None:
     hooks = ReportUsageHooks(model="test-model", max_budget_usd=10.0)
     state = _make_report_state(9.6)
     items: list[Any] = []
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_start(_make_warn_context(requests=0), MagicMock(), None, items)
     assert len(items) == 1
     content = items[0]["content"]
@@ -445,7 +445,7 @@ async def test_turn_and_budget_warnings_stack() -> None:
     hooks = ReportUsageHooks(model="test-model", max_budget_usd=10.0, max_turns=100)
     state = _make_report_state(8.6)
     items: list[Any] = []
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_start(_make_warn_context(requests=89), MagicMock(), None, items)
     assert len(items) == 2
     joined = " ".join(i["content"] for i in items)
@@ -462,7 +462,7 @@ async def test_interactive_at_budget_pauses_instead_of_stopping() -> None:
     hooks = _make_interactive_hooks(10.0)
     state = _make_report_state(10.0)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetPausedError),
     ):
         await hooks.on_llm_end(_make_context(parent_id=None), MagicMock(), MagicMock())
@@ -472,7 +472,7 @@ async def test_interactive_at_budget_pauses_instead_of_stopping() -> None:
 async def test_interactive_subagent_has_no_reserve() -> None:
     hooks = _make_interactive_hooks(10.0)
     state = _make_report_state(9.5)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_end(_make_context(parent_id="root-1"), MagicMock(), MagicMock())
 
 
@@ -481,7 +481,7 @@ async def test_interactive_subagent_pauses_at_full_budget() -> None:
     hooks = _make_interactive_hooks(10.0)
     state = _make_report_state(10.5)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetPausedError),
     ):
         await hooks.on_llm_end(_make_context(parent_id="root-1"), MagicMock(), MagicMock())
@@ -492,7 +492,7 @@ async def test_extend_budget_lifts_the_pause() -> None:
     hooks = _make_interactive_hooks(10.0)
     state = _make_report_state(10.5)
     hooks.extend_budget()
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_end(_make_context(parent_id=None), MagicMock(), MagicMock())
 
 
@@ -502,11 +502,11 @@ async def test_extend_budget_adds_original_amount_each_time() -> None:
     hooks.extend_budget()
     hooks.extend_budget()
     state = _make_report_state(29.9)
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_end(_make_context(parent_id=None), MagicMock(), MagicMock())
     state = _make_report_state(30.0)
     with (
-        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("natsuhat.core.hooks.get_global_report_state", return_value=state),
         pytest.raises(BudgetPausedError),
     ):
         await hooks.on_llm_end(_make_context(parent_id=None), MagicMock(), MagicMock())
@@ -517,7 +517,7 @@ async def test_interactive_subagent_uses_root_warning_bands() -> None:
     hooks = _make_interactive_hooks(10.0)
     state = _make_report_state(7.4)
     items: list[Any] = []
-    with patch("strix.core.hooks.get_global_report_state", return_value=state):
+    with patch("natsuhat.core.hooks.get_global_report_state", return_value=state):
         await hooks.on_llm_start(
             _make_warn_context(requests=0, parent_id="root-1"), MagicMock(), None, items
         )

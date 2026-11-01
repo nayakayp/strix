@@ -1,8 +1,8 @@
 # Node / local-viewer SPA source (the built bundle in
-# strix/interface/viewer/static/ is committed and shipped; do not ignore it)
+# natsuhat/interface/viewer/static/ is committed and shipped; do not ignore it)
 node_modules/
-strix/interface/viewer/frontend/node_modules/
-strix/interface/viewer/frontend/.vite/
+natsuhat/interface/viewer/frontend/node_modules/
+natsuhat/interface/viewer/frontend/.vite/
 
 # Python
 __pycache__/
@@ -75,10 +75,10 @@ logs/
 tensorboard/
 
 # Agent execution traces
-strix_runs/
+natsuhat_runs/
 agent_runs/
 # Workspace-local dashboard credentials (never include in scan artifacts).
-.strix/
+.natsuhat/
 
 # Misc
 *.log
@@ -99,7 +99,7 @@ schema.graphql
 # Root-only local data and reference checkouts
 /.benchmarks/
 /references/
-/strix_runs_main/
+/natsuhat_runs_main/
 
 # Amp-generated portal state and review artifacts (keep .amp/services.yaml tracked)
 /.amp/portals/

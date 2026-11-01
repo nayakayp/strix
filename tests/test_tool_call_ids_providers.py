@@ -1,6 +1,6 @@
 """Tool-call id repair across provider routes, models, and streaming modes.
 
-Every model Strix resolves goes through ``StrixProvider``, which picks the
+Every model Natsuhat resolves goes through ``NatsuhatProvider``, which picks the
 OpenAI SDK for ``openai/...`` and LiteLLM for every other prefix, then wraps the
 result in the turn guard that repairs tool-call ids. Each route parses a
 provider's tool calls on its own code path, so a blank or missing id — or a
@@ -27,9 +27,9 @@ import pytest
 from agents import Agent, ModelSettings, Runner, function_tool
 from agents.run import RunConfig
 
-from strix.config import loader
-from strix.config import models as strix_models
-from strix.config.models import StrixProvider
+from natsuhat.config import loader
+from natsuhat.config import models as natsuhat_models
+from natsuhat.config.models import NatsuhatProvider
 
 
 if TYPE_CHECKING:
@@ -72,8 +72,8 @@ SCENARIOS = {
     "valid-ids": _Scenario(turns=(("call_a",), ("call_b", "call_c"))),
 }
 
-# One model per provider family Strix recommends or documents, each on the
-# route ``StrixProvider`` gives it: the OpenAI SDK for ``openai/``, LiteLLM's
+# One model per provider family Natsuhat recommends or documents, each on the
+# route ``NatsuhatProvider`` gives it: the OpenAI SDK for ``openai/``, LiteLLM's
 # OpenAI-compatible adapters for the rest, and a generic OpenAI-compatible
 # endpoint through ``litellm/openai/``.
 MODELS = [
@@ -240,7 +240,7 @@ def _serve(scenario: _Scenario) -> tuple[HTTPServer, type[_Gateway]]:
 
 @pytest.fixture(autouse=True)
 def _reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key in ("STRIX_LLM", "LLM_DISABLE_STREAMING", "LLM_MAX_TOOL_CALLS_PER_TURN"):
+    for key in ("NATSUHAT_LLM", "LLM_DISABLE_STREAMING", "LLM_MAX_TOOL_CALLS_PER_TURN"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(loader, "_cached", None)
     monkeypatch.setattr(loader, "_override", None)
@@ -266,7 +266,7 @@ async def _run(
     monkeypatch.setattr(loader, "_cached", None)
     # Binding the provider to the gateway sends every route there, the way a
     # custom endpoint would, while each prefix keeps its own adapter.
-    provider = StrixProvider(api_key="tok", base_url=base_url)
+    provider = NatsuhatProvider(api_key="tok", base_url=base_url)
     ran: list[int] = []
 
     @function_tool
@@ -371,7 +371,7 @@ async def test_blank_call_id_is_rejected_on_every_route_without_the_guard(
     # Repro: with the turn guard removed, an empty id reaches the provider on
     # every route, so the matrix above is exercising the repair and not a
     # route that happens to fill ids in on its own.
-    monkeypatch.setattr(strix_models, "_TurnGuardModel", lambda model, **_: model)
+    monkeypatch.setattr(natsuhat_models, "_TurnGuardModel", lambda model, **_: model)
     with (
         _gateway(SCENARIOS["empty-id"]) as (base_url, _handler),
         pytest.raises(Exception, match="must include a non-empty"),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from strix.agents.prompt import render_system_prompt
+from natsuhat.agents.prompt import render_system_prompt
 
 
 _FOLLOW_UP = 'calls `list_coverage(outcome="needs_follow_up")` and follows up every row it returns'

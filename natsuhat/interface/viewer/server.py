@@ -1,0 +1,543 @@
+"""Local HTTP server that serves the viewer SPA and a run's data from disk.
+
+Design notes:
+- Uses the standard-library HTTP server; provider discovery reuses httpx.
+  Static files and JSON reads do not need an async server stack.
+- The browser polls the JSON endpoints (~1s) rather than using SSE: a finished
+  run stops polling, and short-lived polls survive sleep/network blips without
+  server-side connection state, which suits a stdlib ThreadingHTTPServer.
+- All reads happen per-request straight from disk, so the same server serves a
+  live in-progress run and a finished one identically; the SPA distinguishes
+  them via the ``finished`` flag on /api/run.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import mimetypes
+import secrets
+import threading
+import webbrowser
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+
+from natsuhat.core.paths import run_record_path
+from natsuhat.interface.viewer.jobs import JobError, ScanJobManager
+from natsuhat.interface.viewer.transcript import (
+    build_run_state,
+    primary_target,
+    read_report_markdown,
+    read_run_summary,
+    read_vulnerabilities,
+    severity_counts,
+)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+logger = logging.getLogger(__name__)
+
+
+def bundle_dir() -> Path:
+    """Directory holding the committed, prebuilt SPA (index.html + assets)."""
+    return Path(__file__).resolve().parent / "static"
+
+
+def bundle_is_built() -> bool:
+    return (bundle_dir() / "index.html").is_file()
+
+
+def _iter_run_dirs(base_dir: Path) -> list[Path]:
+    """Every run directory under ``base_dir``, newest first by record mtime."""
+    if not base_dir.is_dir():
+        return []
+    run_dirs = [child for child in base_dir.iterdir() if run_record_path(child).is_file()]
+    run_dirs.sort(key=lambda child: run_record_path(child).stat().st_mtime, reverse=True)
+    return run_dirs
+
+
+def run_list_entry(run_dir: Path) -> dict[str, Any]:
+    """Compact summary of a single run for the history list."""
+    record = read_run_summary(run_dir)
+    return {
+        "name": run_dir.name,
+        "target": primary_target(record),
+        "scan_mode": record.get("scan_mode"),
+        "status": record.get("status"),
+        "start_time": record.get("start_time"),
+        "end_time": record.get("end_time"),
+        "finished": bool(record.get("finished")),
+        "severity_counts": severity_counts(read_vulnerabilities(run_dir)),
+    }
+
+
+def build_runs_payload(base_dir: Path, *, authorized: bool) -> dict[str, Any]:
+    """List local runs for callers holding the viewer's session capability."""
+    run_dirs = _iter_run_dirs(base_dir)
+    count = len(run_dirs)
+    if not authorized:
+        return {"locked": True, "count": count, "runs": []}
+    return {"locked": False, "count": count, "runs": [run_list_entry(d) for d in run_dirs]}
+
+
+def resolve_run_dir(base_dir: Path, run_param: str | None, default_run_dir: Path) -> Path | None:
+    """Resolve a ``?run=`` value to a real run directory under ``base_dir``.
+
+    Returns ``default_run_dir`` when no run is requested. Rejects traversal and
+    unknown runs (returns None) so the caller can answer 404.
+    """
+    if not run_param:
+        return default_run_dir
+    base = base_dir.resolve()
+    candidate = (base / run_param).resolve()
+    # Only direct children of the runs base that actually hold a run record.
+    if candidate.parent != base or not run_record_path(candidate).is_file():
+        return None
+    return candidate
+
+
+# Prefix of the cookie carrying the per-process session capability. The bound
+# port is appended (``natsuhat_viewer_session_<port>``) because browsers scope
+# cookies by host only, never by port: concurrent viewers on 127.0.0.1 would
+# otherwise share one cookie slot and clobber each other's session.
+SESSION_COOKIE_PREFIX = "natsuhat_viewer_session"
+
+
+class _ViewerState:
+    def __init__(
+        self,
+        run_dir: Path,
+        assets_dir: Path,
+        steer_handler: Callable[[str, str], bool] | None = None,
+    ) -> None:
+        self.run_dir = run_dir
+        self.assets_dir = assets_dir
+        # The natsuhat_runs directory that holds the launched run; used to
+        # enumerate and resolve other runs for the history list.
+        self.base_dir = run_dir.parent
+        # Set only when the viewer runs inside a live scan process (the TUI
+        # launcher), which can deliver a message to a running agent. Absent for
+        # standalone ``natsuhat view`` / finished runs, so steering is unavailable.
+        self.steer_handler = steer_handler
+        # Unguessable per-process capability. It is minted here, printed/opened
+        # for the operator who started the server (see ``authorized_url``), and
+        # exchanged for a session cookie only when presented on the initial page
+        # load. It is the request-level authorization the review asked for:
+        # reachability of the port (e.g. when bound with ``--host``) is not
+        # enough to read run data, steer a live scan, trigger a report, or
+        # browse history -- the token is never handed to a caller who merely
+        # reaches ``/``.
+        self.session_token = secrets.token_urlsafe(32)
+        # Finalized in ``serve()`` once the port is known (the server binds
+        # after this state is constructed); see SESSION_COOKIE_PREFIX.
+        self.cookie_name = SESSION_COOKIE_PREFIX
+        self.job_manager: ScanJobManager | None = None
+
+
+def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
+    class ViewerHandler(BaseHTTPRequestHandler):
+        server_version = "NatsuhatViewer/1.0"
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            logger.debug("viewer %s - %s", self.address_string(), format % args)
+
+        def do_GET(self) -> None:
+            parts = urlsplit(self.path)
+            path = parts.path
+            try:
+                if path.startswith("/api/"):
+                    self._handle_api(path, parse_qs(parts.query))
+                else:
+                    self._handle_static(path, parse_qs(parts.query))
+            except BrokenPipeError:
+                # The browser closed the connection mid-response (e.g. it
+                # navigated away between polls). Not an error.
+                logger.debug("viewer client disconnected during %s", path)
+            except Exception:
+                # A bad request must never kill the worker thread.
+                logger.exception("viewer request failed: %s", path)
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
+
+        def do_POST(self) -> None:
+            path = urlsplit(self.path).path
+            try:
+                if path == "/api/jobs" or path.startswith(("/api/jobs/", "/api/llm/")):
+                    self._handle_job_post(path)
+                elif path == "/api/event":
+                    self._handle_event()
+                elif path == "/api/agents/steer":
+                    self._handle_steer()
+                else:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+            except BrokenPipeError:
+                logger.debug("viewer client disconnected during POST %s", path)
+            except Exception:
+                # A bad request must never kill the worker thread.
+                logger.exception("viewer request failed: POST %s", path)
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
+
+        def _read_body(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            try:
+                body = json.loads(raw or b"{}")
+            except json.JSONDecodeError:
+                return {}
+            return body if isinstance(body, dict) else {}
+
+        # Funnel events the viewer is allowed to forward. This handler is the
+        # trust boundary: only these event names, with only their known props,
+        # ever reach PostHog. Everything else (including any PII) is dropped.
+        _EMAIL_EVENTS = frozenset(
+            {"email_submitted", "email_verified", "report_sent", "work_email_required"}
+        )
+
+        def _handle_event(self) -> None:
+            body = self._read_body()
+            # Forwarded as anonymous PostHog events that respect the global
+            # telemetry opt-out. Never forward the email, code, or report body:
+            # only the whitelisted event names and their known props are passed.
+            event = body.get("event")
+            if event == "cta_clicked":
+                from natsuhat.telemetry import posthog
+
+                cta = str(body.get("cta") or "unknown")
+                surface = body.get("surface")
+                posthog.viewer_cta_clicked(cta, surface=str(surface) if surface else None)
+            elif event in self._EMAIL_EVENTS:
+                from natsuhat.telemetry import posthog
+
+                purpose = body.get("purpose")
+                posthog.viewer_email_event(str(event), purpose=str(purpose) if purpose else None)
+            elif event == "agent_steered":
+                from natsuhat.telemetry import posthog
+
+                posthog.viewer_agent_steered()
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.end_headers()
+
+        def _handle_api(self, path: str, query: dict[str, list[str]]) -> None:
+            # Local history needs the session capability, not a cloud email login.
+            # Merely reaching an exposed --host port never reveals run entries.
+            if path == "/api/runs":
+                payload = build_runs_payload(state.base_dir, authorized=self._has_session())
+                self._send_json(HTTPStatus.OK, payload)
+                return
+            if path == "/api/capabilities":
+                # Steering is only possible when the viewer shares a live scan's
+                # coordinator + event loop (the TUI launcher wires a handler).
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "can_steer": state.steer_handler is not None,
+                        "can_manage_scans": state.job_manager is not None and self._has_session(),
+                    },
+                )
+                return
+            # All remaining GET endpoints expose run metadata or scan output.
+            # Require the capability even for the run used to launch the viewer;
+            # reachability of an exposed --host port must not grant data access.
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+
+            if path in {"/api/jobs", "/api/llm/settings"} or path.startswith("/api/jobs/"):
+                self._handle_job_get(path)
+                return
+
+            run_values = query.get("run")
+            run_param = run_values[0] if run_values else None
+            run_dir = resolve_run_dir(state.base_dir, run_param, state.run_dir)
+            if run_dir is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown run"})
+                return
+
+            if path == "/api/run":
+                self._send_json(HTTPStatus.OK, read_run_summary(run_dir))
+            elif path == "/api/vulnerabilities":
+                self._send_json(HTTPStatus.OK, read_vulnerabilities(run_dir))
+            elif path == "/api/report":
+                self._send_json(HTTPStatus.OK, {"markdown": read_report_markdown(run_dir)})
+            elif path == "/api/transcript":
+                self._send_json(HTTPStatus.OK, build_run_state(run_dir))
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        def _handle_job_get(self, path: str) -> None:
+            manager = state.job_manager
+            if manager is None:
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "Scan management is disabled."})
+            elif path == "/api/llm/settings":
+                self._send_json(HTTPStatus.OK, manager.llm_profiles.public())
+            elif path == "/api/jobs":
+                self._send_json(HTTPStatus.OK, {"jobs": manager.list(), "max_concurrent": 1})
+            elif path.endswith("/log"):
+                name = unquote(path.removeprefix("/api/jobs/").removesuffix("/log"))
+                try:
+                    self._send_json(HTTPStatus.OK, {"text": manager.log(name)})
+                except JobError as exc:
+                    self._send_json(HTTPStatus(exc.status), {"error": str(exc)})
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        def _handle_job_post(self, path: str) -> None:
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+            manager = state.job_manager
+            if manager is None:
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "Scan management is disabled."})
+                return
+            # JSON-only mutations cannot be sent by cross-site HTML forms.
+            # Reject cross-origin browser requests even if a cookie is present.
+            origin = self.headers.get("Origin")
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" or (
+                origin and urlsplit(origin).netloc != self.headers.get("Host")
+            ):
+                self._send_json(
+                    HTTPStatus.FORBIDDEN, {"error": "Cross-origin requests are forbidden."}
+                )
+                return
+            if self.headers.get_content_type() != "application/json":
+                self._send_json(
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "Use application/json."}
+                )
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 32768:
+                    raise JobError("Request must contain at most 32 KiB of JSON.", 413)
+                parsed_body = json.loads(self.rfile.read(length))
+                if not isinstance(parsed_body, dict):
+                    raise JobError("Expected a JSON object.")
+                body = cast("dict[str, Any]", parsed_body)
+                if path == "/api/llm/models":
+                    self._send_json(
+                        HTTPStatus.OK, {"models": manager.llm_profiles.models(body.get("id"))}
+                    )
+                elif path.startswith("/api/llm/"):
+                    self._send_json(
+                        HTTPStatus.OK,
+                        manager.llm_profiles.update(path.removeprefix("/api/llm/"), body),
+                    )
+                elif path == "/api/jobs":
+                    self._send_json(HTTPStatus.ACCEPTED, {"job": manager.start(body)})
+                elif path.endswith(("/rerun", "/stop")):
+                    name, action = path.removeprefix("/api/jobs/").rsplit("/", 1)
+                    job = (
+                        manager.rerun(unquote(name), body)
+                        if action == "rerun"
+                        else manager.stop(unquote(name))
+                    )
+                    response_status = HTTPStatus.ACCEPTED if action == "rerun" else HTTPStatus.OK
+                    self._send_json(response_status, {"job": job})
+                else:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+            except (ValueError, UnicodeDecodeError) as exc:
+                status = exc.status if isinstance(exc, JobError) else HTTPStatus.BAD_REQUEST
+                message = str(exc) if isinstance(exc, JobError) else "Invalid JSON request."
+                self._send_json(HTTPStatus(status), {"error": message})
+
+        # Cap on a steering message so a runaway client cannot flood the agent.
+        _STEER_MESSAGE_MAX = 4000
+
+        def _handle_steer(self) -> None:
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+            body = self._read_body()
+            agent_id = body.get("agent_id")
+            message = body.get("message")
+            if not isinstance(agent_id, str) or not agent_id.strip():
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_agent_id"})
+                return
+            if (
+                not isinstance(message, str)
+                or not message.strip()
+                or len(message) > self._STEER_MESSAGE_MAX
+            ):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_message"})
+                return
+            if state.steer_handler is None:
+                # Standalone / finished-run viewing has no live scan to steer.
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "steering_unavailable"})
+                return
+            delivered = state.steer_handler(agent_id, message)
+            if delivered:
+                self._send_json(HTTPStatus.OK, {"ok": True})
+            else:
+                self._send_json(HTTPStatus.OK, {"ok": False, "error": "not_delivered"})
+
+        def _cookies(self) -> dict[str, str]:
+            jar: dict[str, str] = {}
+            for chunk in (self.headers.get("Cookie") or "").split(";"):
+                name, sep, value = chunk.strip().partition("=")
+                if sep:
+                    jar[name] = value
+            return jar
+
+        def _has_session(self) -> bool:
+            """True when the request carries this process's session capability.
+
+            The cookie is set only when the SPA is served (index.html), so only
+            the browser this process handed the page to can pass. A direct
+            caller on an exposed port has no cookie and is rejected.
+            """
+            supplied = self._cookies().get(state.cookie_name, "")
+            return bool(supplied) and secrets.compare_digest(supplied, state.session_token)
+
+        def _token_presented(self, query: dict[str, list[str]]) -> bool:
+            """True when the request carries the correct bootstrap token.
+
+            The token reaches the operator's browser through the URL printed /
+            opened by the process that started the server, a channel an
+            arbitrary network caller on an exposed port cannot observe.
+            """
+            supplied = (query.get("token") or [""])[0]
+            return bool(supplied) and secrets.compare_digest(supplied, state.session_token)
+
+        def _handle_static(self, path: str, query: dict[str, list[str]]) -> None:
+            target = self._resolve_asset(path)
+            if target is None:
+                # SPA fallback: unknown non-asset routes render index.html so
+                # client-side deep links work.
+                target = state.assets_dir / "index.html"
+            is_index = target.name == "index.html"
+            if not target.is_file():
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            content = target.read_bytes()
+            content_type, _ = mimetypes.guess_type(str(target))
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type or "application/octet-stream")
+            self.send_header("Content-Length", str(len(content)))
+            if is_index and self._token_presented(query):
+                # Exchange the bootstrap token for the per-process session
+                # capability. Issued only when the correct token is presented,
+                # so a caller who merely reaches ``/`` never obtains it.
+                # HttpOnly (JS never needs it; fetch sends it automatically) and
+                # SameSite=Strict (never sent from a cross-site context).
+                self.send_header(
+                    "Set-Cookie",
+                    f"{state.cookie_name}={state.session_token}; Path=/; HttpOnly; SameSite=Strict",
+                )
+            self.end_headers()
+            self.wfile.write(content)
+
+        def _resolve_asset(self, path: str) -> Path | None:
+            rel = unquote(path).lstrip("/")
+            if not rel or rel.endswith("/"):
+                return None
+            root = state.assets_dir.resolve()
+            candidate = (root / rel).resolve()
+            # Path-traversal guard: never serve outside the bundle root.
+            if root != candidate and root not in candidate.parents:
+                logger.warning("viewer rejected traversal attempt: %s", path)
+                return None
+            return candidate if candidate.is_file() else None
+
+        def _send_json(self, status: HTTPStatus, payload: Any) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+    return ViewerHandler
+
+
+def authorized_url(base_url: str, token: str) -> str:
+    """URL that bootstraps the viewer session for the operator.
+
+    Presenting ``token`` on the initial page load is what mints the session
+    cookie, so this URL is printed / opened only for the operator who started
+    the server. Sharing it (rather than the bare ``base_url``) is what lets a
+    trusted remote user authorize when the viewer is exposed with ``--host``.
+    """
+    return f"{base_url}/?{urlencode({'token': token})}"
+
+
+class _ViewerServer(ThreadingHTTPServer):
+    job_manager: ScanJobManager | None = None
+
+    def server_close(self) -> None:
+        try:
+            if self.job_manager is not None:
+                self.job_manager.close()
+                self.job_manager = None
+        finally:
+            super().server_close()
+
+
+def serve(
+    run_dir: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    open_browser: bool = True,
+    steer_handler: Callable[[str, str], bool] | None = None,
+    manage_scans: bool = False,
+) -> tuple[ThreadingHTTPServer, str, str]:
+    """Start the viewer server on a background thread; return (server, url, token).
+
+    ``url`` is the bare base; pass it through ``authorized_url(url, token)`` to
+    build the operator link that authorizes the browser.
+
+    Binds an ephemeral port by default. If a fixed ``port`` is requested but in
+    use, falls back to an ephemeral port. Reused by both the ``natsuhat view``
+    command and the in-TUI launcher; callers own the server's lifetime.
+
+    ``steer_handler`` is supplied only by the in-TUI launcher, which runs inside
+    the live scan process and can forward a message to a running agent. Left
+    ``None`` (standalone ``natsuhat view``), steering is reported unavailable.
+    """
+    assets_dir = bundle_dir()
+    state = _ViewerState(run_dir=run_dir, assets_dir=assets_dir, steer_handler=steer_handler)
+    handler = _make_handler(state)
+
+    try:
+        httpd = _ViewerServer((host, port), handler)
+    except OSError:
+        if port == 0:
+            raise
+        logger.info("viewer port %s unavailable, falling back to an ephemeral port", port)
+        httpd = _ViewerServer((host, 0), handler)
+
+    if manage_scans:
+        try:
+            state.job_manager = ScanJobManager(state.base_dir)
+            httpd.job_manager = state.job_manager
+        except Exception:
+            httpd.server_close()
+            raise
+
+    httpd.daemon_threads = True
+    bound_port = int(httpd.server_address[1])
+    state.cookie_name = f"{SESSION_COOKIE_PREFIX}_{bound_port}"
+    url = f"http://{host}:{bound_port}"
+
+    thread = threading.Thread(target=httpd.serve_forever, name="natsuhat-viewer", daemon=True)
+    thread.start()
+
+    if open_browser:
+        _open_browser(authorized_url(url, state.session_token))
+
+    return httpd, url, state.session_token
+
+
+def _open_browser(url: str) -> None:
+    try:
+        webbrowser.open(url)
+    except Exception:  # noqa: BLE001 - launching the browser is best-effort
+        logger.debug("could not open browser for %s", url, exc_info=True)
+
+
+__all__ = ["authorized_url", "bundle_dir", "bundle_is_built", "serve"]

@@ -4,7 +4,7 @@ services:
     health: /api/capabilities
     portal:
       url: /
-      title: Strix local dashboard
+      title: Natsuhat local dashboard
       description: Local history, scan management, and LLM settings. Starting scans requires Docker and can incur LLM charges.
   docker:
     platforms: [linux]

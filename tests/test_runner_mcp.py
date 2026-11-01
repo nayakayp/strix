@@ -1,7 +1,7 @@
 """The runner attaches MCP connections source-agnostically.
 
 When a caller supplies ``mcp_connection_requests`` the runner attaches those;
-when it does not, the runner reads ``~/.strix/mcp-servers.json`` itself and wraps
+when it does not, the runner reads ``~/.natsuhat/mcp-servers.json`` itself and wraps
 each config in a bare request. Either way the one shared ``attach_mcp_requests``
 routine does the connecting.
 """
@@ -15,15 +15,15 @@ from typing import Any
 import pytest
 from agents import ModelSettings
 
-import strix.tools.mcp as mcp_pkg
-import strix.tools.notes.tools as notes_tools
-import strix.tools.todo.tools as todo_tools
-from strix.agents import factory
-from strix.core import runner
-from strix.core.agents import AgentCoordinator
-from strix.runtime import session_manager
-from strix.tools.mcp import McpConnectionConfig, McpConnectionRequest
-from strix.tools.mcp import client as mcp_client
+import natsuhat.tools.mcp as mcp_pkg
+import natsuhat.tools.notes.tools as notes_tools
+import natsuhat.tools.todo.tools as todo_tools
+from natsuhat.agents import factory
+from natsuhat.core import runner
+from natsuhat.core.agents import AgentCoordinator
+from natsuhat.runtime import session_manager
+from natsuhat.tools.mcp import McpConnectionConfig, McpConnectionRequest
+from natsuhat.tools.mcp import client as mcp_client
 
 
 _test_mcp_client = importlib.import_module("tests.test_mcp_client")
@@ -73,7 +73,7 @@ def _wire_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     monkeypatch.setattr(runner, "build_root_task", lambda _c: "task")
     monkeypatch.setattr(runner, "build_scope_context", lambda _c: {})
     monkeypatch.setattr(runner, "make_model_settings", lambda *_a, **_k: ModelSettings())
-    monkeypatch.setattr(runner, "build_strix_agent", lambda **_k: object())
+    monkeypatch.setattr(runner, "build_natsuhat_agent", lambda **_k: object())
     monkeypatch.setattr(runner, "make_child_factory", lambda **_k: lambda **_kk: object())
     monkeypatch.setattr(runner, "open_agent_session", lambda _root_id, _db: object())
     monkeypatch.setattr(
@@ -108,7 +108,7 @@ async def test_none_default_attaches_from_the_user_config_file(
 
     monkeypatch.setattr(mcp_pkg.McpRegistry, "register", _capture)
 
-    await runner.run_strix_scan(
+    await runner.run_natsuhat_scan(
         scan_config={"targets": [], "scan_mode": "deep"},
         scan_id="scan-none",
         image="img",
@@ -151,7 +151,7 @@ async def test_supplied_requests_are_attached_and_the_user_file_is_not_read(
         )
     ]
 
-    await runner.run_strix_scan(
+    await runner.run_natsuhat_scan(
         scan_config={"targets": [], "scan_mode": "deep"},
         scan_id="scan-supplied",
         image="img",
@@ -188,7 +188,7 @@ async def test_roster_is_persisted_even_without_a_status_sink(
 
     monkeypatch.setattr(runner, "_persist_mcp_status", _capture_persist)
 
-    await runner.run_strix_scan(
+    await runner.run_natsuhat_scan(
         scan_config={"targets": [], "scan_mode": "deep"},
         scan_id="scan-persist",
         image="img",
@@ -232,9 +232,9 @@ async def test_warmup_listing_failure_does_not_interrupt_scan(
         lambda _config: _built_server(server),
     )
     root_builds: list[dict[str, Any]] = []
-    monkeypatch.setattr(runner, "build_strix_agent", lambda **kwargs: root_builds.append(kwargs))
+    monkeypatch.setattr(runner, "build_natsuhat_agent", lambda **kwargs: root_builds.append(kwargs))
 
-    await runner.run_strix_scan(
+    await runner.run_natsuhat_scan(
         scan_config={"targets": [], "scan_mode": "deep"},
         scan_id="scan-mcp-list-failure",
         image="img",
@@ -266,7 +266,7 @@ async def test_warmed_tool_counts_reach_root_and_child_agent_builds(
 
     monkeypatch.setattr(
         runner,
-        "build_strix_agent",
+        "build_natsuhat_agent",
         _build_root,
     )
     child_builds: list[dict[str, Any]] = []
@@ -277,7 +277,7 @@ async def test_warmed_tool_counts_reach_root_and_child_agent_builds(
 
     monkeypatch.setattr(
         factory,
-        "build_strix_agent",
+        "build_natsuhat_agent",
         _build_child,
     )
     real_make_child_factory = factory.make_child_factory
@@ -293,7 +293,7 @@ async def test_warmed_tool_counts_reach_root_and_child_agent_builds(
         config=McpConnectionConfig(name="db", url="https://mcp.example.com", notes="database")
     )
 
-    await runner.run_strix_scan(
+    await runner.run_natsuhat_scan(
         scan_config={"targets": [], "scan_mode": "deep"},
         scan_id="scan-mcp-prompt-counts",
         image="img",
