@@ -9,24 +9,45 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+import zipfile
 from typing import TYPE_CHECKING
 
 import pytest
 
 from natsuhat.interface.viewer import remote, remote_snapshot
+from natsuhat.interface.viewer.sources import SourceStore
 
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-@pytest.mark.parametrize("manifest", ["ready", "outdated", "missing", "recover"])
-def test_prepared_runner_scans_without_installing_and_rejects_stale_images(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest: str
+@pytest.mark.parametrize(
+    "manifest,with_source",
+    [
+        ("ready", False),
+        ("outdated", False),
+        ("missing", False),
+        ("recover", False),
+        ("ready", True),
+    ],
+)
+def test_prepared_runner_scans_without_installing_and_rejects_stale_images(  # noqa: PLR0915 - prepared runner lifecycle
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest: str, with_source: bool
 ) -> None:
     controller, vm_root = tmp_path / "controller", tmp_path / "vm"
     controller.mkdir()
-    job = {"id": "prepared-scan", "runner": "e2b", "target": "https://authorized.test"}
+    job: dict = {"id": "prepared-scan", "runner": "e2b", "target": "https://authorized.test"}
+    if with_source:
+        monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+        store = SourceStore(controller.parent.parent)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as bundle:
+            bundle.writestr("project/app.py", "SOURCE TRANSFER FIXTURE")
+        raw = output.getvalue()
+        upload = store.upload(io.BytesIO(raw), len(raw), "project.zip")
+        job["id"] = "e2b-" + "e" * 32
+        job["source"] = store.snapshot(upload["upload_id"], job["id"])
     (controller / "job.json").write_text(json.dumps(job))
     package = vm_root / "natsuhat/natsuhat/interface/viewer"
     package.mkdir(parents=True)
@@ -36,9 +57,12 @@ def test_prepared_runner_scans_without_installing_and_rejects_stale_images(
     # A synthetic scan engine isolates model billing, not preparation: the real
     # controller, process supervisor, filesystem permissions and result transfer run.
     (package / "job_runner.py").write_text(
-        "import json,sys\nfrom pathlib import Path\n"
+        "import json,os,sys,zipfile\nfrom pathlib import Path\n"
         "directory=Path(sys.argv[1])\n"
         "job=json.loads((directory/'job.json').read_text())\n"
+        "if job.get('source'):\n"
+        " with zipfile.ZipFile(os.environ['NATSUHAT_DASHBOARD_SOURCE_PATH']) as z:\n"
+        "  assert z.read('code/app.py') == b'SOURCE TRANSFER FIXTURE'\n"
         "with (directory/'launches').open('a') as log: log.write('launched\\n')\n"
         "(directory/'run.json').write_text(json.dumps({'status':'completed',"
         "'target':job['target']}))\nprint('PREPARED_SCAN_EXECUTED')\nsys.exit(2)\n"
@@ -124,8 +148,11 @@ def test_prepared_runner_scans_without_installing_and_rejects_stale_images(
         "status": "completed",
         "target": "https://authorized.test",
     }
-    assert (vm_root / "natsuhat/natsuhat_runs/prepared-scan/launches").read_text() == "launched\n"
+    assert (vm_root / f"natsuhat/natsuhat_runs/{job['id']}/launches").read_text() == "launched\n"
     assert (vm_root / "llm.json").stat().st_mode & 0o777 == 0o600
+    if with_source:
+        assert (vm_root / "source.zip").stat().st_mode & 0o777 == 0o600
+        assert not (controller / "source.zip").exists()
     assert not (vm_root / "source.tar.gz").exists()
     assert not (vm_root / "natsuhat/uv.lock").exists()
 
@@ -144,6 +171,130 @@ def test_runner_revision_ignores_archive_metadata_but_detects_dependency_changes
     first = remote.runner_revision(bundle(modified=False, reversed_order=False))
     assert first == remote.runner_revision(bundle(modified=False, reversed_order=True))
     assert first != remote.runner_revision(bundle(modified=True, reversed_order=True))
+
+
+@pytest.mark.parametrize("retained", ["ready", "unconfirmed_exit", "different_vm"])
+def test_resume_uses_retained_vm_and_checkpoint_without_replaying_fresh_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retained: str
+) -> None:
+    controller, vm = tmp_path / "controller", tmp_path / "vm"
+    controller.mkdir()
+    name = "e2b-saved-scan"
+    job = {
+        "id": name,
+        "runner": "e2b",
+        "target": "https://authorized.test",
+        "scan_mode": "quick",
+        "max_budget_usd": 7.5,
+    }
+    (controller / "job.json").write_text(json.dumps(job))
+    (controller / "runner.json").write_text(
+        json.dumps(
+            {
+                "cleanup": "paused",
+                "sandbox_id": "retained-vm",
+                "boot_id": "previous-boot",
+            }
+        )
+    )
+    run = vm / "natsuhat/natsuhat_runs" / name
+    (run / ".state").mkdir(parents=True)
+    record = {
+        "status": "stopped",
+        "start_time": "2026-01-01T10:00:00Z",
+        "instruction": "ORIGINAL INSTRUCTION",
+        "llm_usage": {"cost": 1.23},
+        "targets_info": [
+            {
+                "type": "web_application",
+                "original": job["target"],
+                "details": {"target_url": job["target"]},
+            }
+        ],
+    }
+    (run / "run.json").write_text(json.dumps(record))
+    (run / ".state/agents.json").write_text('{"parent_of":{"root":null}}')
+    with sqlite3.connect(run / ".state/agents.db") as database:
+        database.execute("CREATE TABLE messages (content TEXT)")
+        database.execute("INSERT INTO messages VALUES ('SAVED CONVERSATION')")
+    (run / "vulnerabilities.json").write_text('[{"id":"vuln-0001"}]')
+    helper = vm / "natsuhat/natsuhat/interface/viewer/remote_snapshot.py"
+    helper.parent.mkdir(parents=True)
+    shutil.copyfile(remote_snapshot.__file__, helper)
+    if retained != "unconfirmed_exit":
+        (vm / "scan.exit").write_text("130")
+    # Only the scan engine is replaced: the real resumed entrypoint, CLI parser,
+    # supervisor, checkpoint filesystem and result snapshots run in a child.
+    bootstrap = vm / "synthetic_engine.py"
+    bootstrap.write_text(
+        "import importlib,json,runpy,sqlite3,sys\nfrom pathlib import Path\n"
+        "cli=importlib.import_module('natsuhat.interface.main')\n"
+        "from natsuhat.interface.cli_args import parse_arguments\n"
+        "def engine(**kwargs):\n"
+        " args=parse_arguments()\n"
+        " assert args.resume == 'e2b-saved-scan' and args.max_budget_usd == 7.5\n"
+        " assert args.instruction == 'ORIGINAL INSTRUCTION'\n"
+        " path=Path('natsuhat_runs')/args.resume\n"
+        " record=json.loads((path/'run.json').read_text())\n"
+        " assert record['llm_usage']['cost'] == 1.23\n"
+        " with sqlite3.connect(path/'.state/agents.db') as db:\n"
+        "  history=db.execute('SELECT content FROM messages').fetchall()\n"
+        "  assert history == [('SAVED CONVERSATION',)]\n"
+        " record['status']='completed'\n"
+        " (path/'run.json').write_text(json.dumps(record))\n"
+        " print('CHECKPOINT CONTINUED',flush=True)\n"
+        " raise SystemExit(2)\n"
+        "cli.main=engine\nsys.argv=sys.argv[1:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n"
+    )
+    monkeypatch.setenv(
+        "NATSUHAT_DASHBOARD_LLM",
+        json.dumps(
+            {
+                "model": "synthetic",
+                "api_key": "private-test-key",
+            }
+        ),
+    )
+
+    class Sandbox:
+        id = "different-vm" if retained == "different_vm" else "retained-vm"
+
+        def create(self) -> None:
+            raise AssertionError("Resume must never create a new sandbox")
+
+        def restore(self) -> None:
+            pass
+
+        def resume(self) -> bool:
+            return False
+
+        def upload(self, path: str, data: bytes) -> None:
+            (vm / path.removeprefix("/home/runner/")).write_bytes(data)
+
+        def download(self, path: str) -> bytes:
+            return (vm / path.removeprefix("/home/runner/")).read_bytes()
+
+        def command(self, command: str, *, background: bool = False) -> str:  # noqa: ARG002
+            command = command.replace("/home/runner", str(vm)).replace(
+                f"{vm}/natsuhat/.venv/bin/python", f"{sys.executable} {bootstrap}"
+            )
+            return subprocess.run(  # noqa: S603 - trusted controller in disposable fixture
+                ["/bin/bash", "-c", command], check=True, capture_output=True, text=True
+            ).stdout
+
+    monkeypatch.setattr(remote, "RemoteSandbox", lambda *_: Sandbox())
+    worker = remote.RemoteRun(controller)
+    if retained != "ready":
+        with pytest.raises(remote.JobError, match=r"no confirmed exit|does not match"):
+            worker.execute(resume=True)
+        assert not (vm / "llm.json").exists()
+        assert json.loads((run / "run.json").read_text()) == record
+        return
+    assert worker.execute(resume=True) == 2
+    assert json.loads((controller / "run.json").read_text()) == {**record, "status": "completed"}
+    assert json.loads((controller / "vulnerabilities.json").read_text()) == [{"id": "vuln-0001"}]
+    assert "CHECKPOINT CONTINUED" in (controller / "remote.log").read_text()
+    assert json.loads((controller / "runner.json").read_text())["sandbox_id"] == "retained-vm"
 
 
 @pytest.mark.parametrize(

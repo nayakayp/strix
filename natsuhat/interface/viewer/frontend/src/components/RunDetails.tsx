@@ -80,6 +80,7 @@ export function RunDetails({
     })
     .filter(Boolean);
   const status = cap(str(raw.status));
+  const source = rec(raw.source);
 
   let scope = scopeMode ?? "auto";
   if (diffActive) {
@@ -130,6 +131,15 @@ export function RunDetails({
             Configuration
           </h3>
           <dl className="space-y-2.5">
+            {str(source.kind) && <>
+              <Field label="Source">{source.kind === "github" ? "GitHub repository" : "ZIP upload"}</Field>
+              <Field label="Codebase">{str(source.repository) ?? str(source.filename)}</Field>
+              {str(source.ref) && <Field label="Git ref">{str(source.ref)}</Field>}
+              {str(source.commit) && <Field label="Commit"><span className="break-all font-mono text-xs">{str(source.commit)}</span></Field>}
+              <Field label="Snapshot"><span className="break-all font-mono text-xs">{str(source.sha256)}</span></Field>
+              <Field label="Files">{num(source.files)?.toLocaleString()}</Field>
+              {arr(source.warnings).length > 0 && <Field label="Source warnings"><div className="space-y-1 text-xs text-amber-400">{arr(source.warnings).map((warning, index) => <p key={index}>{str(warning)}</p>)}</div></Field>}
+            </>}
             {targets.length > 0 && (
               <Field label="Targets">
                 <div className="space-y-1">

@@ -15,7 +15,12 @@ export default defineConfig({
     proxy: process.env.NATSUHAT_VIEWER_DEV_BACKEND ? {
       "/api": {
         target: process.env.NATSUHAT_VIEWER_DEV_BACKEND,
-        headers: { Cookie: process.env.NATSUHAT_VIEWER_DEV_COOKIE ?? "" },
+        configure(proxy) {
+          proxy.on("proxyReq", (request, incoming) => {
+            // Preserve the session-bound GitHub flow cookie across callbacks.
+            request.setHeader("Cookie", [incoming.headers.cookie, process.env.NATSUHAT_VIEWER_DEV_COOKIE].filter(Boolean).join("; "));
+          });
+        },
       },
     } : undefined,
   },

@@ -28,10 +28,12 @@ import Sidebar from "@/components/Sidebar";
 import PastRunsView from "@/components/PastRunsView";
 import ScanJobsView from "@/components/ScanJobsView";
 import LlmSettingsView from "@/components/LlmSettingsView";
+import GithubIntegrationsView from "@/components/GithubIntegrationsView";
+import RunnerSettingsView from "@/components/RunnerSettingsView";
 import { RunDetails } from "@/components/RunDetails";
 import { TrustToast } from "@/components/TrustToast";
 
-export type View = "pentest" | "overview" | "issues" | "agents" | "settings";
+export type View = "pentest" | "overview" | "issues" | "agents" | "settings" | "integrations" | "runners";
 
 function readPage(): { view: View; run: string | null } {
   const params = new URLSearchParams(window.location.hash.slice(1));
@@ -39,7 +41,7 @@ function readPage(): { view: View; run: string | null } {
   const run = params.get("run");
   const tab = params.get("tab");
   return {
-    view: page === "settings" ? "settings" : run ? (tab === "issues" || tab === "agents" ? tab : "overview") : "pentest",
+    view: page === "runners" ? "runners" : page === "integrations" ? "integrations" : page === "settings" ? "settings" : run ? (tab === "issues" || tab === "agents" ? tab : "overview") : "pentest",
     run,
   };
 }
@@ -205,8 +207,8 @@ export default function App() {
 
   const userSetView = useCallback((v: View, name?: string) => {
     setSelectedId(null);
-    const params = new URLSearchParams({ page: v === "settings" ? "settings" : "pentest" });
-    if (v !== "pentest" && v !== "settings") {
+    const params = new URLSearchParams({ page: v === "settings" || v === "integrations" || v === "runners" ? v : "pentest" });
+    if (v !== "pentest" && v !== "settings" && v !== "integrations" && v !== "runners") {
       params.set("run", name ?? activeRun ?? "");
       params.set("tab", v);
     }
@@ -232,7 +234,7 @@ export default function App() {
     }
   }
 
-  const isRunView = view !== "pentest" && view !== "settings";
+  const isRunView = view === "overview" || view === "issues" || view === "agents";
 
   return (
     <div className="min-h-screen bg-black text-white flex">
@@ -255,11 +257,13 @@ export default function App() {
               <img src="./logo.png" alt="Natsuhat" className="w-10 h-8 object-cover" />
               <div className="text-base text-white font-medium tracking-tight">Natsuhat</div>
             </div>
-            <span className="hidden text-sm text-[#888] lg:inline">{view === "settings" ? "LLM settings" : "Pentest"}{isRunView ? " / Scan details" : ""}</span>
+            <span className="hidden text-sm text-[#888] lg:inline">{view === "runners" ? "Sandbox runners" : view === "integrations" ? "Integrations" : view === "settings" ? "LLM settings" : "Pentest"}{isRunView ? " / Scan details" : ""}</span>
             {isRunView && run?.summary.runId && <LiveIndicator finished={run.finished} />}
-            <nav aria-label="Main navigation" className="ml-auto flex items-center gap-4 lg:hidden">
-              <TabButton active={view !== "settings"} onClick={() => userSetView("pentest")}>Pentest</TabButton>
+            <nav aria-label="Main navigation" className="ml-auto flex flex-wrap items-center gap-4 lg:hidden">
+              <TabButton active={view === "pentest" || isRunView} onClick={() => userSetView("pentest")}>Pentest</TabButton>
               {canManageScans && <TabButton active={view === "settings"} onClick={() => userSetView("settings")}>LLM settings</TabButton>}
+              {canManageScans && <TabButton active={view === "runners"} onClick={() => userSetView("runners")}>Sandbox runners</TabButton>}
+              {canManageScans && <TabButton active={view === "integrations"} onClick={() => userSetView("integrations")}>Integrations</TabButton>}
             </nav>
           </div>
         </div>
@@ -278,13 +282,17 @@ export default function App() {
             key={`${activeRun ?? "launched"}:${view}:${selectedId ?? ""}`}
             className="animate-page-in space-y-6"
           >
-          {view === "settings" ? (
+          {view === "runners" ? (
+            canManageScans ? <RunnerSettingsView /> : <p className="text-sm text-[#888]">Runner settings require an authorized scan-management session.</p>
+          ) : view === "integrations" ? (
+            canManageScans ? <GithubIntegrationsView /> : <p className="text-sm text-[#888]">Integrations require an authorized scan-management session.</p>
+          ) : view === "settings" ? (
             canManageScans ? <LlmSettingsView /> : <p className="text-sm text-[#888]">LLM settings require an authorized scan-management session.</p>
           ) : view === "pentest" ? (
             <div className="space-y-4">
               {deleteError && <p role="alert" className="text-sm text-red-400">{deleteError}</p>}
               {canManageScans ? (
-                <ScanJobsView runs={runs} onSelectRun={selectRun} onDeleteRun={removeRun} deleting={deleting} />
+                <ScanJobsView onSelectRun={selectRun} onDeleteRun={removeRun} deleting={deleting} />
               ) : (
                 <>
                   <h1 className="text-2xl font-semibold">Pentest</h1>

@@ -39,6 +39,7 @@ from natsuhat.interface.viewer.transcript import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing import BinaryIO
 
 
 logger = logging.getLogger(__name__)
@@ -145,13 +146,16 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         server_version = "NatsuhatViewer/1.0"
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-            logger.debug("viewer %s - %s", self.address_string(), format % args)
+            if urlsplit(self.path).path != "/api/github/callback":
+                logger.debug("viewer %s - %s", self.address_string(), format % args)
 
         def do_GET(self) -> None:
             parts = urlsplit(self.path)
             path = parts.path
             try:
-                if path.startswith("/api/"):
+                if path == "/api/github/callback":
+                    self._github_callback(parse_qs(parts.query))
+                elif path.startswith("/api/"):
                     self._handle_api(path, parse_qs(parts.query))
                 else:
                     self._handle_static(path, parse_qs(parts.query))
@@ -168,7 +172,14 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             path = urlsplit(self.path).path
             try:
                 if path == "/api/jobs" or path.startswith(
-                    ("/api/jobs/", "/api/runs/", "/api/llm/")
+                    (
+                        "/api/jobs/",
+                        "/api/runs/",
+                        "/api/llm/",
+                        "/api/github/",
+                        "/api/sources/",
+                        "/api/runners/",
+                    )
                 ):
                     self._handle_job_post(path)
                 elif path == "/api/event":
@@ -249,7 +260,13 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
                 return
 
-            if path in {"/api/jobs", "/api/llm/settings"} or path.startswith("/api/jobs/"):
+            if path in {
+                "/api/jobs",
+                "/api/llm/settings",
+                "/api/runners/settings",
+                "/api/github",
+                "/api/github/refresh",
+            } or path.startswith("/api/jobs/"):
                 self._handle_job_get(path)
                 return
 
@@ -277,6 +294,15 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "Scan management is disabled."})
             elif path == "/api/llm/settings":
                 self._send_json(HTTPStatus.OK, manager.llm_profiles.public())
+            elif path == "/api/runners/settings":
+                self._send_json(HTTPStatus.OK, manager.runner_settings.public())
+            elif path in {"/api/github", "/api/github/refresh"}:
+                try:
+                    self._send_json(
+                        HTTPStatus.OK, manager.github.public(refresh=path.endswith("/refresh"))
+                    )
+                except JobError as exc:
+                    self._send_json(HTTPStatus(exc.status), {"error": str(exc)})
             elif path == "/api/jobs":
                 self._send_json(HTTPStatus.OK, {"jobs": manager.list(), **manager.configuration()})
             elif path.endswith("/log"):
@@ -297,14 +323,14 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 raise JobError("Expected a JSON object.")
             return cast("dict[str, Any]", parsed_body)
 
-        def _handle_job_post(self, path: str) -> None:
+        def _management_session(self) -> ScanJobManager | None:
             if not self._has_session():
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
-                return
+                return None
             manager = state.job_manager
             if manager is None:
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "Scan management is disabled."})
-                return
+                return None
             # JSON-only mutations cannot be sent by cross-site HTML forms.
             # Reject cross-origin browser requests even if a cookie is present.
             origin = self.headers.get("Origin")
@@ -314,6 +340,15 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(
                     HTTPStatus.FORBIDDEN, {"error": "Cross-origin requests are forbidden."}
                 )
+                return None
+            return manager
+
+        def _handle_job_post(self, path: str) -> None:  # noqa: PLR0912 - management route dispatch
+            manager = self._management_session()
+            if manager is None:
+                return
+            if path == "/api/sources/upload":
+                self._upload_source(manager)
                 return
             if self.headers.get_content_type() != "application/json":
                 self._send_json(
@@ -322,7 +357,20 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 body = self._read_mutation_body()
-                if path == "/api/llm/models":
+                if path.startswith("/api/github/"):
+                    action = path.removeprefix("/api/github/")
+                    flow = secrets.token_urlsafe(32) if action == "connect" else ""
+                    result = manager.github.update(action, body, flow)
+                    headers = (
+                        {
+                            "Set-Cookie": f"{state.cookie_name}_github={flow}; "
+                            "Path=/api/github; HttpOnly; SameSite=Lax; Max-Age=600"
+                        }
+                        if flow
+                        else None
+                    )
+                    self._send_json(HTTPStatus.OK, result, headers=headers)
+                elif path == "/api/llm/models":
                     self._send_json(
                         HTTPStatus.OK, {"models": manager.llm_profiles.models(body.get("id"))}
                     )
@@ -331,6 +379,12 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                         HTTPStatus.OK,
                         manager.llm_profiles.update(path.removeprefix("/api/llm/"), body),
                     )
+                elif path == "/api/runners/settings":
+                    self._send_json(HTTPStatus.OK, manager.runner_settings.update(body))
+                elif path == "/api/runners/check":
+                    self._send_json(
+                        HTTPStatus.OK, manager.runner_settings.check(body.get("provider"))
+                    )
                 elif path == "/api/jobs":
                     self._send_json(HTTPStatus.ACCEPTED, {"job": manager.start(body)})
                 elif path.startswith("/api/runs/") and path.endswith("/delete"):
@@ -338,14 +392,17 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                         raise JobError("Confirm deletion of this scan and its local results.")
                     manager.delete(unquote(path.removeprefix("/api/runs/").removesuffix("/delete")))
                     self._send_json(HTTPStatus.OK, {"ok": True})
-                elif path.endswith(("/rerun", "/stop")):
+                elif path.startswith("/api/jobs/") and path.endswith(
+                    ("/rerun", "/resume", "/stop")
+                ):
                     name, action = path.removeprefix("/api/jobs/").rsplit("/", 1)
-                    job = (
-                        manager.rerun(unquote(name), body)
-                        if action == "rerun"
-                        else manager.stop(unquote(name))
-                    )
-                    response_status = HTTPStatus.ACCEPTED if action == "rerun" else HTTPStatus.OK
+                    if action == "resume":
+                        job = manager.resume(unquote(name), body)
+                    elif action == "rerun":
+                        job = manager.rerun(unquote(name), body)
+                    else:
+                        job = manager.stop(unquote(name))
+                    response_status = HTTPStatus.OK if action == "stop" else HTTPStatus.ACCEPTED
                     self._send_json(response_status, {"job": job})
                 else:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
@@ -353,6 +410,55 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 status = exc.status if isinstance(exc, JobError) else HTTPStatus.BAD_REQUEST
                 message = str(exc) if isinstance(exc, JobError) else "Invalid JSON request."
                 self._send_json(HTTPStatus(status), {"error": message})
+
+        def _upload_source(self, manager: ScanJobManager) -> None:
+            previous_timeout = self.connection.gettimeout()
+            try:
+                if self.headers.get_content_type() != "application/zip" or self.headers.get(
+                    "Transfer-Encoding"
+                ):
+                    self._send_json(
+                        HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                        {"error": "Use an application/zip body with Content-Length."},
+                    )
+                    return
+                self.connection.settimeout(60)
+                result = manager.sources.upload(
+                    cast("BinaryIO", self.rfile),
+                    int(self.headers.get("Content-Length") or 0),
+                    unquote(self.headers.get("X-Source-Filename", "source.zip")),
+                )
+                self._send_json(HTTPStatus.CREATED, result)
+            except (ValueError, OSError) as exc:
+                status = exc.status if isinstance(exc, JobError) else 400
+                message = (
+                    str(exc) if isinstance(exc, JobError) else "ZIP upload failed or timed out."
+                )
+                self._send_json(HTTPStatus(status), {"error": message})
+            finally:
+                self.connection.settimeout(previous_timeout)
+
+        def _github_callback(self, query: dict[str, list[str]]) -> None:
+            # The normal capability stays SameSite=Strict. Only this short-lived,
+            # single-use flow cookie crosses GitHub's top-level redirect.
+            manager = state.job_manager
+            flow = self._cookies().get(state.cookie_name + "_github", "")
+            if manager is None or not flow:
+                self._send_json(
+                    HTTPStatus.FORBIDDEN,
+                    {"error": "Start GitHub connection from an authorized dashboard session."},
+                )
+                return
+            try:
+                location = manager.github.callback(query, flow)
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self.send_header("Location", location)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except JobError as exc:
+                self._send_json(HTTPStatus(exc.status), {"error": str(exc)})
 
         # Cap on a steering message so a runaway client cannot flood the agent.
         _STEER_MESSAGE_MAX = 4000
@@ -452,12 +558,16 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 return None
             return candidate if candidate.is_file() else None
 
-        def _send_json(self, status: HTTPStatus, payload: Any) -> None:
+        def _send_json(
+            self, status: HTTPStatus, payload: Any, *, headers: dict[str, str] | None = None
+        ) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 

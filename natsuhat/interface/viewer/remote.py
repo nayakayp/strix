@@ -27,6 +27,7 @@ import natsuhat
 from natsuhat.config import load_settings
 from natsuhat.interface.viewer.llm_settings import JobError
 from natsuhat.interface.viewer.remote_snapshot import is_result
+from natsuhat.interface.viewer.sources import SourceStore
 from natsuhat.report.writer import atomic_write_text
 
 
@@ -86,9 +87,10 @@ def validate_runner(provider: Any, target: str) -> str:
 class RemoteSandbox:
     """The small provider seam used by the scan controller."""
 
-    def __init__(self, provider: str, job_id: str) -> None:
+    def __init__(self, provider: str, job_id: str, template: str | None = None) -> None:
         self.provider = provider
         self.job_id = job_id
+        self.template = template
         self.resource: Any = None
         self.client: Any = None
         self.id: str | None = None
@@ -98,7 +100,7 @@ class RemoteSandbox:
             from e2b import Sandbox  # noqa: PLC0415 - SDK only in remote worker
 
             self.resource = Sandbox.create(
-                os.getenv("NATSUHAT_E2B_TEMPLATE", runner_image_name()),
+                self.template or os.getenv("NATSUHAT_E2B_TEMPLATE", runner_image_name()),
                 timeout=min(3600, remote_timeout()),
                 lifecycle={"on_timeout": "pause", "auto_resume": False},
                 metadata={"natsuhat_job": self.job_id},
@@ -119,7 +121,8 @@ class RemoteSandbox:
                 self.resource = self.client.create(
                     CreateSandboxFromSnapshotParams(
                         name=self.job_id,
-                        snapshot=os.getenv("NATSUHAT_DAYTONA_SNAPSHOT", runner_image_name()),
+                        snapshot=self.template
+                        or os.getenv("NATSUHAT_DAYTONA_SNAPSHOT", runner_image_name()),
                         os_user="runner",
                         public=False,
                         labels={"natsuhat_job": self.job_id},
@@ -290,16 +293,20 @@ def source_bundle() -> bytes:
     with tarfile.open(fileobj=result, mode="w:gz") as archive:
         for name in required:
             archive.add(inputs / name, arcname=name, recursive=False)
-        for path in package.rglob("*"):
-            relative = path.relative_to(package)
-            if (
-                path.is_file()
-                and not path.is_symlink()
-                and not set(relative.parts)
-                & {"frontend", "static", "bin", "_runner", "__pycache__"}
-                and path.suffix in {".py", ".md", ".jinja", ".j2", ".json", ".yaml", ".yml", ".txt"}
-            ):
-                archive.add(path, arcname="natsuhat/" + relative.as_posix(), recursive=False)
+        excluded = {"frontend", "static", "bin", "_runner", "__pycache__"}
+        for directory, directories, files in package.walk():
+            directories[:] = [name for name in directories if name not in excluded]
+            for name in files:
+                path = directory / name
+                if (
+                    name not in excluded
+                    and path.is_file()
+                    and not path.is_symlink()
+                    and path.suffix
+                    in {".py", ".md", ".jinja", ".j2", ".json", ".yaml", ".yml", ".txt"}
+                ):
+                    relative = path.relative_to(package)
+                    archive.add(path, arcname="natsuhat/" + relative.as_posix(), recursive=False)
     return result.getvalue()
 
 
@@ -307,10 +314,13 @@ def runner_revision(bundle: bytes | None = None) -> str:
     """Identify application/build contents, independent of tar timestamps and owners."""
     digest = hashlib.sha256()
     with tarfile.open(fileobj=io.BytesIO(bundle or source_bundle()), mode="r:gz") as archive:
-        for member in sorted(archive.getmembers(), key=lambda item: item.name):
+        contents: list[tuple[str, bytes]] = []
+        for member in archive:
             stream = archive.extractfile(member)
             assert stream is not None
-            digest.update(member.name.encode() + b"\0" + hashlib.sha256(stream.read()).digest())
+            contents.append((member.name, hashlib.sha256(stream.read()).digest()))
+        for name, checksum in sorted(contents):
+            digest.update(name.encode() + b"\0" + checksum)
     return digest.hexdigest()
 
 
@@ -458,18 +468,8 @@ class RemoteRun:
                     ) from None
             self.stop.wait(5)
 
-    def execute(self) -> int:
-        settings = load_settings()
-        override = json.loads(os.environ.pop("NATSUHAT_DASHBOARD_LLM", "{}"))
-        connection = settings.llm.model_copy(update=override).model_dump()
-        if not connection.get("api_key") or not connection.get("model"):
-            raise JobError("Remote scans require a configured API-key LLM connection.")
-        self.redactions = [str(connection["api_key"])]
-        self.sandbox = RemoteSandbox(self.job["runner"], self.job["id"])
-        self.sandbox.create()
-        self.save(sandbox_id=self.sandbox.id)
-        if self.stop.is_set():
-            raise InterruptedError("Scan cancelled during provisioning.")
+    def check_prepared_runner(self) -> None:
+        assert self.sandbox is not None
         self.save(phase="Checking prepared runner")
         try:
             manifest = json.loads(self.sandbox.command("cat /opt/natsuhat-runner.json"))
@@ -484,9 +484,41 @@ class RemoteRun:
         if not ready:
             raise JobError(
                 "Runner image is missing, incomplete, or incompatible with this application. "
-                "Build a scan-ready image with `uv run --frozen python scripts/runner_images.py "
+                "Build a scan-ready image with "
+                "`uv run --frozen python scripts/runner_images.py "
                 f"{self.job['runner']}` and select it. No per-scan installation is performed."
             ) from None
+
+    def execute(self, *, resume: bool = False) -> int:
+        settings = load_settings()
+        override = json.loads(os.environ.pop("NATSUHAT_DASHBOARD_LLM", "{}"))
+        connection = settings.llm.model_copy(update=override).model_dump()
+        if not connection.get("api_key") or not connection.get("model"):
+            raise JobError("Remote scans require a configured API-key LLM connection.")
+        self.redactions = [str(connection["api_key"])]
+        self.sandbox = RemoteSandbox(
+            self.job["runner"], self.job["id"], self.job.get("runner_template")
+        )
+        if resume:
+            self.save(phase="Restoring retained sandbox")
+            self.sandbox.restore()
+            if self.sandbox.id != self.state.get("sandbox_id"):
+                raise JobError("The retained sandbox does not match this scan. Resume refused.")
+            if not self.sandbox.command("cat /home/runner/scan.exit 2>/dev/null || true").strip():
+                raise JobError(
+                    "The previous scan process has no confirmed exit. "
+                    "Retrieve results and stop it before resuming."
+                )
+            # A checkpoint restart does not require the old process memory.
+            # Subsequent automatic VM resumes must preserve this new boot.
+            self.save(boot_id=self.sandbox.command("cat /proc/sys/kernel/random/boot_id").strip())
+        else:
+            self.sandbox.create()
+            self.save(sandbox_id=self.sandbox.id)
+        if self.stop.is_set():
+            raise InterruptedError("Scan cancelled during provisioning.")
+        if not resume:
+            self.check_prepared_runner()
         remote_dir = f"{self.root}/natsuhat_runs/{self.job['id']}"
         self.sandbox.command(f"mkdir -p {remote_dir}")
         self.sandbox.upload(
@@ -495,20 +527,36 @@ class RemoteRun:
         instructions = self.run_dir / "instructions.txt"
         if instructions.exists():
             self.sandbox.upload(remote_dir + "/instructions.txt", instructions.read_bytes())
+        source_env: list[str] = []
+        if self.job.get("source"):
+            archive = (
+                SourceStore(self.run_dir.parent.parent).directory(self.job["id"]) / "source.zip"
+            )
+            self.sandbox.upload("/home/runner/source.zip", archive.read_bytes())
+            self.sandbox.command("chmod 600 /home/runner/source.zip")
+            source_env = ["NATSUHAT_DASHBOARD_SOURCE_PATH=/home/runner/source.zip"]
         self.sandbox.upload("/home/runner/llm.json", json.dumps(connection).encode())
         self.sandbox.command("chmod 600 /home/runner/llm.json")
-        self.save(results_pending=True)
+        worker = ["-m", "natsuhat.interface.viewer.job_runner", remote_dir]
+        if resume:
+            # Older retained images already support CLI checkpoints but their
+            # dashboard entrypoint lacks --resume. Stage only this adapter;
+            # retain the VM's engine, dependencies, checkpoints and tool data.
+            self.sandbox.upload(
+                "/home/runner/resume_job.py", Path(__file__).with_name("job_runner.py").read_bytes()
+            )
+            worker = ["/home/runner/resume_job.py", remote_dir, "--resume"]
+        self.save(results_pending=True, cleanup="pending", error=None)
         code = self.phase(
-            "Scanning",
+            "Resuming scan" if resume else "Scanning",
             [
                 "env",
                 "NATSUHAT_IMAGE=natsuhat-sandbox:local",
                 "NATSUHAT_TELEMETRY=false",
                 "NATSUHAT_DASHBOARD_LLM_PATH=/home/runner/llm.json",
+                *source_env,
                 f"{self.root}/.venv/bin/python",
-                "-m",
-                "natsuhat.interface.viewer.job_runner",
-                remote_dir,
+                *worker,
             ],
             results=True,
         )
@@ -571,7 +619,7 @@ class RemoteRun:
     def cancel(self, _number: int, _frame: FrameType | None) -> None:
         self.stop.set()
 
-    def run(self, *, cleanup_only: bool = False) -> int:
+    def run(self, *, cleanup_only: bool = False, resume: bool = False) -> int:
         signal.signal(signal.SIGTERM, self.cancel)
         signal.signal(signal.SIGINT, self.cancel)
         code = 130 if cleanup_only else 1
@@ -582,7 +630,7 @@ class RemoteRun:
                 if self.state.get("results_pending"):
                     self.collect_results(restore=True)
             else:
-                code = self.execute()
+                code = self.execute(resume=resume)
         except InterruptedError:
             code = 130
         except Exception as exc:  # noqa: BLE001 - sanitize SDK errors and always stop the VM

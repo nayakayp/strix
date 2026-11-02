@@ -19,17 +19,19 @@ import threading
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from natsuhat.interface.viewer.github import GithubConnection
 from natsuhat.interface.viewer.llm_settings import JobError, LlmProfiles
 from natsuhat.interface.viewer.remote import (
     RETAINED,
-    default_runner,
     remote_limit,
     remote_timeout,
     runners,
     validate_runner,
 )
+from natsuhat.interface.viewer.runner_settings import RunnerSettings
+from natsuhat.interface.viewer.sources import SourceStore
 from natsuhat.interface.viewer.transcript import read_run_summary
 from natsuhat.report.writer import atomic_write_text
 
@@ -69,6 +71,9 @@ class ScanJobManager:
             raise JobError("Another viewer already manages scans in this directory.", 409) from exc
         try:
             self.llm_profiles = LlmProfiles.for_workspace(self.base_dir.parent)
+            self.runner_settings = RunnerSettings(self.base_dir.parent)
+            self.sources = SourceStore(self.base_dir.parent)
+            self.github = GithubConnection(self.base_dir.parent, self.sources)
         except BaseException:
             self._owner.close()
             raise
@@ -117,30 +122,71 @@ class ScanJobManager:
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [
-                {
-                    **job,
-                    "has_run": (self.base_dir / job["id"] / "run.json").is_file(),
-                    **self._runner_state(job["id"]),
-                }
-                for job in sorted(self._jobs.values(), key=lambda j: j["start_time"], reverse=True)
-            ]
+            result: list[dict[str, Any]] = []
+            for job in sorted(self._jobs.values(), key=lambda j: j["start_time"], reverse=True):
+                reason = self._resume_error(job)
+                result.append(
+                    {
+                        **job,
+                        "has_run": (self.base_dir / job["id"] / "run.json").is_file(),
+                        "can_resume": reason is None,
+                        "resume_unavailable_reason": reason,
+                        **self._runner_state(job["id"]),
+                    }
+                )
+            return result
 
     def _runner_state(self, name: str) -> dict[str, Any]:
         path = self.base_dir / name / "runner.json"
         return {"remote": json.loads(path.read_text())} if path.exists() else {}
 
+    def _resume_error(self, job: dict[str, Any]) -> str | None:  # noqa: PLR0911 - explicit eligibility reasons
+        if job["status"] not in {"stopped", "interrupted"}:
+            return "Only stopped or interrupted scans can be resumed."
+        directory = self.base_dir / job["id"]
+        try:
+            record = json.loads((directory / "run.json").read_text())
+            checkpoint = json.loads((directory / ".state" / "agents.json").read_text())
+        except (OSError, ValueError):
+            return "No readable agent checkpoint is available. Start a new scan instead."
+        if not isinstance(record, dict) or not isinstance(checkpoint, dict):
+            return "No readable agent checkpoint is available. Start a new scan instead."
+        record = cast("dict[str, Any]", record)
+        checkpoint = cast("dict[str, Any]", checkpoint)
+        if record.get("status") == "completed":
+            return "This scan is already completed."
+        parents = checkpoint.get("parent_of")
+        if (
+            not (directory / ".state" / "agents.db").is_file()
+            or not isinstance(parents, dict)
+            or not any(parent is None for parent in cast("dict[str, Any]", parents).values())
+        ):
+            return "No saved agent session is available. Start a new scan instead."
+        remote = self._runner_state(job["id"]).get("remote", {})
+        if remote.get("results_pending") or remote.get("cleanup") == "failed":
+            return "Retry results or sandbox cleanup before resuming this scan."
+        return (
+            "The retained sandbox is unavailable. Start a new scan instead."
+            if job.get("runner", "local") != "local"
+            and (
+                remote.get("cleanup") not in {"paused", "archived"} or not remote.get("sandbox_id")
+            )
+            else None
+        )
+
     def configuration(self) -> dict[str, Any]:
         return {
             "runners": runners(),
-            "default_runner": default_runner(),
+            "default_runner": self.runner_settings.default(),
             "max_concurrent": 1 + remote_limit(),
             "max_remote_concurrent": remote_limit(),
             "remote_timeout_seconds": remote_timeout(),
         }
 
-    def start(self, body: dict[str, Any]) -> dict[str, Any]:
-        target = body.get("target")
+    def start(self, body: dict[str, Any], *, snapshot: str | None = None) -> dict[str, Any]:
+        source = body.get("source")
+        has_source = source is not None or snapshot is not None
+        target = "source snapshot" if has_source else body.get("target")
         if not isinstance(target, str) or not target.strip() or len(target) > 4096:
             raise JobError("Provide a target URL, domain, IP, repository, or local path.")
         target = target.strip()
@@ -162,7 +208,13 @@ class ScanJobManager:
         instruction = body.get("instruction", "")
         if not isinstance(instruction, str) or len(instruction) > 16000:
             raise JobError("Instructions must be text, at most 16,000 characters.")
-        runner = validate_runner(body.get("runner", default_runner()), target)
+        runner = validate_runner(
+            body.get("runner", self.runner_settings.default()),
+            "https://source.invalid" if has_source else target,
+        )
+        template = self.runner_settings.preflight(runner)
+        if source is not None:
+            snapshot = self._prepare_source(source)
         with self._lock:
             if self._closed:
                 raise JobError("The scan manager is shutting down.", 503)
@@ -176,11 +228,21 @@ class ScanJobManager:
                     "Remote scan concurrency limit reached. Stop a scan or wait for a slot.", 409
                 )
             llm = self.llm_profiles.selected()
-            env = os.environ.copy()
-            if llm is not None:
-                env["NATSUHAT_DASHBOARD_LLM"] = json.dumps(llm)
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("NATSUHAT_GITHUB_")
+            }
+            env.update({"NATSUHAT_DASHBOARD_LLM": json.dumps(llm)} if llm is not None else {})
             name = f"{runner}-{uuid.uuid4().hex}"
             run_dir = self.base_dir / name
+            metadata = self.sources.snapshot(snapshot, name) if snapshot else None
+            if metadata:
+                target = (
+                    f"{metadata['repository']}@{metadata['commit']}"
+                    if metadata["kind"] == "github"
+                    else metadata["filename"]
+                )
             run_dir.mkdir(mode=0o700)
             job: dict[str, Any] = {
                 "id": name,
@@ -194,6 +256,8 @@ class ScanJobManager:
                 "error": None,
                 "llm_model": llm["model"] if llm is not None else None,
                 "runner": runner,
+                **({"runner_template": template} if template else {}),
+                **({"source": metadata} if metadata else {}),
             }
             self._jobs[name] = job
             self._save(job)
@@ -202,8 +266,26 @@ class ScanJobManager:
             self._launch(job, env=env)
             return dict(job)
 
+    def _prepare_source(self, source: Any) -> str:
+        if not isinstance(source, dict):
+            raise JobError("Choose a GitHub repository or ZIP upload.")
+        source = cast("dict[str, Any]", source)
+        if source.get("kind") not in ("zip", "github"):
+            raise JobError("Choose a GitHub repository or ZIP upload.")
+        if source["kind"] == "github":
+            return self.github.download(source.get("repository_id"), source.get("ref"))
+        identifier = source.get("upload_id")
+        if not isinstance(identifier, str) or not identifier.startswith("upload-"):
+            raise JobError("Upload a ZIP before starting the scan.")
+        return identifier
+
     def _launch(
-        self, job: dict[str, Any], *, env: dict[str, str] | None = None, cleanup: bool = False
+        self,
+        job: dict[str, Any],
+        *,
+        env: dict[str, str] | None = None,
+        cleanup: bool = False,
+        resume: bool = False,
     ) -> None:
         name = job["id"]
         run_dir = self.base_dir / name
@@ -211,8 +293,10 @@ class ScanJobManager:
         if cleanup:
             command.append("--cleanup")
             job["cleanup_only"] = True
+        elif resume:
+            command.append("--resume")
         try:
-            with (run_dir / "job.log").open("ab" if cleanup else "wb") as log:
+            with (run_dir / "job.log").open("ab" if cleanup or resume else "wb") as log:
                 process = subprocess.Popen(  # noqa: S603 - fixed Python module, no shell
                     command,
                     cwd=self.base_dir.parent,
@@ -236,6 +320,8 @@ class ScanJobManager:
         watcher.start()
 
     def rerun(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("authorized") is not True:
+            raise JobError("Confirm that you are authorized to test this target.")
         with self._lock:
             job = self._jobs.get(name)
             if job is None:
@@ -248,6 +334,8 @@ class ScanJobManager:
                     "Retry results or sandbox cleanup before starting another scan.", 409
                 )
             instructions = self.base_dir / name / "instructions.txt"
+            if job.get("source", {}).get("kind") == "github":
+                self.github.repository_token(job["source"]["repository_id"])
             return self.start(
                 {
                     "target": job["target"],
@@ -258,8 +346,65 @@ class ScanJobManager:
                     else "",
                     "runner": job.get("runner", "local"),
                     "authorized": body.get("authorized"),
-                }
+                },
+                snapshot=name if job.get("source") else None,
             )
+
+    def resume(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("authorized") is not True:
+            raise JobError("Confirm that you are authorized to resume testing this target.")
+        with self._lock:
+            job = self._jobs.get(name)
+            if job is None:
+                raise JobError("Unknown local scan job.", 404)
+            if reason := self._resume_error(job):
+                raise JobError(reason, 409)
+            if self._closed:
+                raise JobError("The scan manager is shutting down.", 503)
+            runner = validate_runner(
+                job.get("runner", "local"),
+                "https://source.invalid" if job.get("source") else job["target"],
+            )
+            active = [self._jobs[key].get("runner", "local") for key in self._processes]
+            if runner == "local" and "local" in active:
+                raise JobError("A local scan is already active. Wait for it to finish.", 409)
+            if runner != "local" and sum(item != "local" for item in active) >= remote_limit():
+                raise JobError("Remote scan concurrency limit reached. Wait for a slot.", 409)
+            budget = body.get("max_budget_usd", job["max_budget_usd"])
+            if (
+                isinstance(budget, bool)
+                or not isinstance(budget, (int, float))
+                or not math.isfinite(budget)
+                or (budget != -1 and budget <= 0)
+            ):
+                raise JobError("Set an LLM budget greater than zero (USD), or -1 for unlimited.")
+            record = json.loads((self.base_dir / name / "run.json").read_text())
+            spent = record.get("llm_usage", {}).get("cost", 0)
+            if budget != -1 and budget <= spent:
+                raise JobError(
+                    "This total LLM budget is already spent. Increase it before resuming.", 409
+                )
+            if job.get("source", {}).get("kind") == "github":
+                self.github.repository_token(job["source"]["repository_id"])
+            llm = self.llm_profiles.selected()
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("NATSUHAT_GITHUB_")
+            }
+            env.update({"NATSUHAT_DASHBOARD_LLM": json.dumps(llm)} if llm is not None else {})
+            job.update(
+                status="starting",
+                end_time=None,
+                exit_code=None,
+                error=None,
+                max_budget_usd=budget,
+                llm_model=llm["model"] if llm is not None else None,
+                resumed_at=_now(),
+            )
+            self._save(job)
+            self._launch(job, env=env, resume=True)
+            return dict(job)
 
     def _wait(self, name: str, process: subprocess.Popen[bytes]) -> None:
         code = process.wait()
@@ -370,6 +515,8 @@ class ScanJobManager:
             if remote and (remote.get("cleanup") not in RETAINED or remote.get("results_pending")):
                 raise JobError("Retrieve results and finish sandbox cleanup before deleting.", 409)
             shutil.rmtree(directory)
+            if job and job.get("source"):
+                self.sources.remove(name)
             self._jobs.pop(name, None)
 
     def log(self, name: str) -> str:

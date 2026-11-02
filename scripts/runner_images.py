@@ -3,7 +3,8 @@
 
 Usage: uv run --frozen python scripts/runner_images.py e2b
 Requires the selected provider's API key in the environment. Creates persistent,
-potentially billable provider resources; never replaces an existing name.
+potentially billable provider resources. --release publishes versioned E2B builds
+and promotes the stable tag only after fresh-VM and resume smoke tests pass.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from natsuhat.interface.viewer.remote import (
     runner_revision,
     source_bundle,
 )
+from natsuhat.interface.viewer.runner_settings import image_metadata
 
 
 if TYPE_CHECKING:
@@ -36,6 +38,9 @@ logger = logging.getLogger(__name__)
 CONTEXT = Path(__file__).resolve().parents[1] / "containers" / "runner"
 STAGE = (
     "mkdir -p /home/runner/natsuhat && "
+    # A prepared base can contain files removed since its release. Keep its
+    # dependency cache and tools, but replace the application rather than overlay it.
+    "rm -rf /home/runner/natsuhat/natsuhat && "
     "tar --no-same-owner -xzf /home/runner/source.tar.gz -C /home/runner/natsuhat && "
     "rm /home/runner/source.tar.gz && "
     "install -m 0755 /home/runner/natsuhat/containers/runner/start.sh "
@@ -115,11 +120,47 @@ echo RUNNER_IMAGE_SMOKE_OK
 """
 
 
-def create_e2b(name: str, context: Path, base: str | None) -> None:
+def create_e2b(
+    name: str, context: Path, base: str | None, *, release: bool = False, smoke: bool = True
+) -> None:
     from e2b import Template  # noqa: PLC0415 - optional, script-only SDK
 
+    revision = json.loads((context / "manifest.json").read_text())["revision"]
     if Template.exists(name, request_timeout=30):
-        raise SystemExit(f"E2B template {name!r} already exists; choose a new name.")
+        if not release:
+            raise SystemExit(f"E2B template {name!r} already exists; choose a new name.")
+        logger.info("Rechecking existing release without rebuilding: %s", name)
+    else:
+        build_e2b(name, context, base)
+    # Pin the candidate's build before testing. Never promote a tag that moved
+    # to another build while verification was in progress.
+    candidate = e2b_build_id(name) if release else None
+    if smoke:
+        verify_e2b(name, revision)
+    else:
+        logger.warning("Sandbox smoke tests skipped by request; image contents are unverified.")
+    if release:
+        if e2b_build_id(name) != candidate:
+            raise RuntimeError("Candidate changed during verification; stable was not updated.")
+        stable = name.partition(":")[0] + ":stable"
+        if Template.exists(stable, request_timeout=30):
+            logger.info("Previous stable build: %s", e2b_build_id(stable))
+        promoted = Template.assign_tags(name, "stable", request_timeout=60)
+        if promoted.build_id != candidate or e2b_build_id(stable) != candidate:
+            raise RuntimeError("Stable promotion could not be confirmed; inspect provider tags.")
+        logger.info("E2B stable promoted: %s -> %s (build %s)", stable, name, candidate)
+
+
+def e2b_build_id(name: str) -> str:
+    metadata = image_metadata("e2b", name)
+    if not metadata or not metadata["available"] or not metadata.get("build_id"):
+        raise RuntimeError(f"E2B release {name!r} is not ready; stable was not updated.")
+    return str(metadata["build_id"])
+
+
+def build_e2b(name: str, context: Path, base: str | None) -> None:
+    from e2b import Template  # noqa: PLC0415
+
     builder = Template(file_context_path=context)
     template = (
         builder.from_template(base)
@@ -147,7 +188,6 @@ def create_e2b(name: str, context: Path, base: str | None) -> None:
     logger.info("E2B build submitted: template=%s build=%s", build.template_id, build.build_id)
     wait_e2b(build)
     logger.info("E2B template created: %s (ID %s)", name, build.template_id)
-    verify_e2b(name)
 
 
 def wait_e2b(build: BuildInfo) -> None:
@@ -176,7 +216,7 @@ def wait_e2b(build: BuildInfo) -> None:
     )
 
 
-def verify_e2b(name: str) -> None:
+def verify_e2b(name: str, revision: str) -> None:
     from e2b import Sandbox  # noqa: PLC0415
 
     started = time.monotonic()
@@ -188,11 +228,25 @@ def verify_e2b(name: str) -> None:
     )
     logger.info("Fresh E2B sandbox created in %.1f seconds", time.monotonic() - started)
     try:
+        manifest = json.loads(sandbox.files.read("/opt/natsuhat-runner.json"))
+        if manifest.get("revision") != revision:
+            raise RuntimeError(
+                "Published manifest differs from the requested application revision."
+            )
         result = sandbox.commands.run(SMOKE, timeout=180, request_timeout=190)
         logger.info("%s", result.stdout)
         if result.exit_code != 0:
             raise RuntimeError(result.stderr)
-        logger.info("E2B creation and smoke verification: %.1f seconds", time.monotonic() - started)
+        sandbox.pause(request_timeout=90)
+        sandbox = Sandbox.connect(sandbox.sandbox_id, timeout=300, request_timeout=90)
+        resumed = sandbox.commands.run(SMOKE, timeout=180, request_timeout=190)
+        logger.info("%s", resumed.stdout)
+        if resumed.exit_code != 0:
+            raise RuntimeError(resumed.stderr)
+        logger.info(
+            "E2B creation, smoke and same-VM resume verification: %.1f seconds",
+            time.monotonic() - started,
+        )
     finally:
         sandbox.pause(request_timeout=90)
         logger.info("E2B verification sandbox paused and retained: %s", sandbox.sandbox_id)
@@ -327,12 +381,29 @@ if __name__ == "__main__":
     logger.setLevel(logging.INFO)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("provider", choices=("e2b", "daytona"))
-    parser.add_argument("--name", help="Override the content-versioned image name.")
+    naming = parser.add_mutually_exclusive_group()
+    naming.add_argument("--name", help="Override the content-versioned image name.")
+    naming.add_argument(
+        "--release", help="E2B family name; publish rev-<hash>, then promote stable."
+    )
     parser.add_argument("--base", help="Reuse an existing minimal runner template/snapshot.")
+    parser.add_argument(
+        "--skip-smoke", action="store_true", help="E2B only: publish without sandbox smoke tests."
+    )
     args = parser.parse_args()
+    if args.skip_smoke and args.provider != "e2b":
+        parser.error("--skip-smoke is supported only for E2B.")
+    if args.release and (
+        args.provider != "e2b" or ":" in args.release or any(c.isspace() for c in args.release)
+    ):
+        parser.error("--release requires an E2B family name without a tag or whitespace.")
     bundle = source_bundle()
     revision = runner_revision(bundle)
-    name = args.name or "natsuhat-ready-" + revision[:16]
+    name = (
+        (args.release + ":rev-" + revision)
+        if args.release
+        else (args.name or "natsuhat-ready-" + revision[:16])
+    )
     logger.info("Building %s for application revision %s", name, revision)
     with tempfile.TemporaryDirectory(prefix="natsuhat-image-") as temporary:
         context = Path(temporary)
@@ -340,4 +411,9 @@ if __name__ == "__main__":
             shutil.copyfile(CONTEXT / filename, context / filename)
         (context / "source.tar.gz").write_bytes(bundle)
         (context / "manifest.json").write_text(json.dumps({"revision": revision}))
-        {"e2b": create_e2b, "daytona": create_daytona}[args.provider](name, context, args.base)
+        if args.provider == "e2b":
+            create_e2b(
+                name, context, args.base, release=bool(args.release), smoke=not args.skip_smoke
+            )
+        else:
+            create_daytona(name, context, args.base)

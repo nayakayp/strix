@@ -78,6 +78,23 @@ logs, and results unchanged. This starts over; it does not resume a scan. Reruns
 are disabled when that runner pool is full or remote cleanup is unconfirmed.
 Completed, stopped, and interrupted jobs cannot be rerun through this action.
 
+Stopped and interrupted jobs instead show **Resume scan** when their saved agent
+checkpoint and session database are available. This continues the same run ID,
+conversation history, findings, and source snapshot, using the currently selected
+LLM settings. Confirm authorization again and set a **total** LLM budget: earlier
+spending still counts. An exhausted cap must be increased, or set to `-1` for
+unlimited spending. Existing concurrency limits still apply.
+
+Remote resumes restore the original retained E2B or Daytona sandbox and use its
+installed engine, not the current stable image or a newly created VM. A small
+dashboard resume adapter supports older retained images with CLI checkpoint
+support; dependencies and security tools are not reinstalled. Resumed provider
+compute is billable. Local resumes recreate the tool sandbox. Neither approach
+restores terminated commands, network connections, or in-flight model requests;
+agents continue from their latest saved checkpoint. Completed scans, missing
+checkpoints, and missing remote sandboxes cannot resume. Pending results or
+unconfirmed cleanup must be recovered first.
+
 If result transfer fails, **Retry results** retrieves files from the retained
 sandbox without launching another scan. It briefly resumes provider compute,
 then pauses or archives the sandbox again; provider charges may apply. Recovery
@@ -98,14 +115,56 @@ Remote workers get up to eighteen minutes for final synchronization and VM pause
 Completed job history survives viewer restarts. After an unexpected viewer exit,
 an inherited owner lock prevents another manager from starting until its old
 worker exits; stale active records are then marked interrupted. There is no
-automatic restart, adoption of saved PIDs, or scan resumption.
+automatic restart, adoption of saved PIDs, or automatic scan resumption. Use
+**Resume scan** explicitly after recovery if a checkpoint is available.
 
 ### E2B And Daytona Runners
 
 Set `E2B_API_KEY` and/or `DAYTONA_API_KEY` on the dashboard server, using a secret
 manager rather than a committed file. E2B is the default for new scans when its
 key is configured; otherwise Local Docker is the default. Daytona stays available
-as an explicit choice. Create a reusable runner image once:
+as an explicit choice. **Sandbox runners** settings can override the default
+and persist an E2B template or Daytona snapshot name/ID for this workspace.
+Selections live in `~/.natsuhat/dashboard/<workspace hash>/runner-settings.json`,
+outside scan sources. Explicit dashboard selections override server environment
+image settings; blank fields use the environment override or the required content
+version. These settings apply only to new dashboard jobs, not CLI defaults.
+
+The settings page shows the required application revision and offers read-only
+provider availability checks. Missing, unavailable, or recognizably older images
+are rejected before creating a job or billable VM. A matching versioned name is
+not proof of image contents; custom names/IDs without versioned aliases remain
+unverified. The worker still checks the full image manifest before sending LLM
+credentials. Checks expire after 60 seconds and are invalidated by application
+or selection changes. Checking or saving settings never builds an image or
+starts a sandbox. E2B tagged selections such as **`natsuhat-runner:stable`** resolve
+to a provider build and a full `rev-<content hash>` tag. Settings show both; each
+new job saves that revision tag rather than the moving `stable` tag. The revision
+must match this application's full content hash. An unrelated newer failed or
+building release does not invalidate an existing ready stable build.
+
+Publish an updateable E2B family:
+
+```bash
+uv run --frozen python scripts/runner_images.py e2b --release natsuhat-runner
+# Later updates can reuse the prepared stable image:
+uv run --frozen python scripts/runner_images.py e2b --release natsuhat-runner --base natsuhat-runner:stable
+```
+
+The builder creates `natsuhat-runner:rev-<full content hash>` and, by default,
+checks a fresh sandbox and the same sandbox after pause/resume before promoting
+`natsuhat-runner:stable`. Failed smoke tests leave stable unchanged. Existing
+revision tags are reused and rechecked, never overwritten by this builder.
+Older revision tags remain available for rollback: select one in Settings, or
+publish again from its matching checkout to promote it back to stable. E2B tags
+can be reassigned externally, so the worker still verifies the actual manifest.
+`--skip-smoke` explicitly bypasses sandbox tests and publishes after the build
+finishes; it does not establish runtime compatibility. Save
+`natsuhat-runner:stable` in **Sandbox runners → E2B template name, tag, or ID**.
+Application source changes still require republishing; stable is not an automatic
+build or a bypass for the manifest check.
+
+The original content-named E2B templates and Daytona snapshots are also supported:
 
 ```bash
 uv run --frozen python scripts/runner_images.py e2b
@@ -113,8 +172,8 @@ uv run --frozen python scripts/runner_images.py daytona
 ```
 
 These commands create persistent, potentially billable templates/snapshots, run
-a nested-Docker smoke test, and retain its VM paused (E2B) or archived (Daytona). They refuse
-to replace an existing name. The image source is `containers/runner/`. The builder
+a nested-Docker smoke test, and retain its VM paused (E2B) or archived (Daytona). These
+legacy commands refuse to replace an existing name. The image source is `containers/runner/`. The builder
 installs the exact application and frozen Python dependencies and builds the
 Kali tool image **once**, before saving the template/snapshot. This one-time
 build may take tens of minutes. E2B captures Docker already running; Daytona
@@ -194,9 +253,10 @@ The session-protected JSON endpoints are:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/jobs` | List jobs, runner availability/default, concurrency limits, remote phase/cleanup/resume count, and result availability |
+| GET | `/api/jobs` | List jobs, resume eligibility/reason, runner availability/default, concurrency limits, remote phase/cleanup/resume count, and result availability |
 | POST | `/api/jobs` | Start with `target`, `scan_mode`, `max_budget_usd`, `authorized: true`, optional `runner` (`local`, `e2b`, `daytona`; defaults to E2B when configured, otherwise local), and optional `instruction` |
 | POST | `/api/jobs/<id>/rerun` | Start a new job from a failed job with `authorized: true`; other statuses return `409` |
+| POST | `/api/jobs/<id>/resume` | Continue a stopped/interrupted checkpoint with `authorized: true` and optional `max_budget_usd` (total cap, defaults to the previous cap); unavailable checkpoints or capacity return `409` |
 | POST | `/api/jobs/<id>/stop` | Stop a job, recover pending results, or retry failed remote cleanup (safe to repeat; result recovery can resume compute) |
 | GET | `/api/jobs/<id>/log` | Read the log tail |
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from natsuhat.core.paths import run_record_path
 from natsuhat.interface.tui.live_view import TuiLiveView
@@ -55,6 +55,13 @@ def read_run_summary(run_dir: Path) -> dict[str, Any]:
     record = _load_json(run_record_path(run_dir), default={})
     if not isinstance(record, dict):
         record = {}
+    record = cast("dict[str, Any]", record)
+    job = _load_json(run_dir / "job.json", default={})
+    job = cast("dict[str, Any]", job) if isinstance(job, dict) else {}
+    if isinstance(job.get("source"), dict):
+        record["source"] = job["source"]
+        targets: list[dict[str, Any]] = record.get("targets_info") or [{}]
+        record["targets_info"] = [{**targets[0], "original": job["target"]}]
     status = record.get("status")
     finished = status in _TERMINAL_STATUSES and bool(record.get("end_time"))
     return {**record, "finished": finished}

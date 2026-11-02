@@ -50,6 +50,58 @@ history without email verification.
 Headless exit codes: `0` no findings, `1` fatal error, `2` findings found. A clean
 exit does not guarantee complete coverage: check the run status, scope, and budget.
 
+## Dashboard codebase scans
+
+Start `uv run --frozen natsuhat view --manage-scans` and use **Pentest → New scan**.
+Choose a target URL/server path, a connected GitHub repository, or a ZIP codebase.
+Every scan still requires authorization and an LLM budget. Uploading or connecting
+a repository never starts a scan.
+
+ZIPs need no Git history. Limits are 100 MiB compressed, 500 MiB extracted, and
+20,000 entries. Unsafe paths, links, encrypted archives, and duplicate destinations
+are rejected. Git metadata and macOS archive metadata are removed before storage
+or transfer. Submodules and Git LFS pointers produce warnings; their contents are
+not fetched automatically. Review archives for secrets before uploading.
+
+For GitHub, register a self-hosted GitHub App with **Contents: read-only** and
+**Metadata: read-only**, no webhooks, and automatic user authorization during
+installation disabled. Set both its **Setup URL** and OAuth **Callback URL** to
+`https://your-dashboard.example/api/github/callback`. Enable **Redirect on update**
+for the Setup URL so existing installations can reconnect. Configure these on the
+dashboard server through your secret manager, then restart it:
+
+- `NATSUHAT_GITHUB_APP_ID`: the App ID, not the client ID.
+- `NATSUHAT_GITHUB_PRIVATE_KEY_PATH`: an RSA PEM key file outside scan sources;
+  protect it with owner-only permissions.
+- `NATSUHAT_GITHUB_CLIENT_ID` and `NATSUHAT_GITHUB_CLIENT_SECRET`: App OAuth credentials.
+- `NATSUHAT_GITHUB_CALLBACK_URL`: the same stable HTTPS callback URL configured above.
+
+Open **Integrations → GitHub**, install the App on selected repositories, authorize
+your GitHub account, then refresh and connect repositories. GitHub installation
+access and user repository access must both permit the connection. Branches/tags
+resolve to exact commits before scanning. Disconnecting locally blocks new GitHub
+scans; uninstall the App on GitHub to revoke its installation access.
+
+Selecting a repository and ref checks commit availability before submission.
+Empty repositories show a warning and disable **Start scan**. After pushing code,
+use **Check again**. Checks do not download source or start scans; source access
+and the current commit are checked again when submitting.
+
+Sources are stored per workspace under `~/.natsuhat/dashboard/`, outside results
+and scan mounts. Each scan gets an immutable snapshot and a disposable writable
+copy; failed-scan reruns use the same snapshot. Unused uploads expire after 24
+hours and are removed on the next upload or server start. Deleting a scan removes
+its local source snapshot. E2B/Daytona scans explicitly transfer code to the
+provider's retained sandbox; deleting local results does not delete that sandbox.
+GitHub credentials never go to runners. Code excerpts can reach the configured LLM.
+
+Stopped or interrupted dashboard scans with saved agent checkpoints show
+**Resume scan**. Confirm authorization and the total LLM budget, including prior
+spending, to continue the same run and conversation history. Remote resumes use
+the retained E2B/Daytona sandbox, not a new VM; provider charges resume. Source
+scans use the original snapshot. Completed scans and scans without checkpoints
+cannot be resumed. Resuming does not restore terminated commands or network sessions.
+
 ## Configuration
 
 Use `NATSUHAT_*` environment variables for application settings. Configuration is

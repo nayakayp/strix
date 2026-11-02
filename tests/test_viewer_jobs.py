@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
+import sqlite3
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 
-from natsuhat.interface.viewer import jobs, llm_settings
+from natsuhat.interface.viewer import jobs, llm_settings, runner_settings
 from natsuhat.interface.viewer.llm_settings import LlmProfiles
 from natsuhat.interface.viewer.server import SESSION_COOKIE_PREFIX, serve
 from natsuhat.utils.secret_files import dashboard_profiles_path, dashboard_secrets_dir
@@ -32,6 +35,7 @@ REQUEST = {
     "authorized": True,
     "runner": "local",
 }
+_REAL_IMAGE_METADATA = runner_settings.image_metadata
 
 # Only the scan process is replaced. HTTP auth, persistence, process waiting,
 # signals and server shutdown all execute their real implementations.
@@ -47,6 +51,11 @@ if '--cleanup' in sys.argv[2:]:
     }
     (directory / 'runner.json').write_text(json.dumps(state))
     sys.exit(130)
+if '--resume' in sys.argv[2:]:
+    record = json.loads((directory / 'run.json').read_text())
+    record.update(status='running', end_time=None)
+    (directory / 'run.json').write_text(json.dumps(record))
+    print('Resumed checkpoint: ' + job['id'], flush=True)
 print('Synthetic child: ' + job['target'], flush=True)
 if 'NATSUHAT_DASHBOARD_LLM' in os.environ:
     snapshot = json.loads(os.environ['NATSUHAT_DASHBOARD_LLM'])
@@ -88,8 +97,14 @@ def isolated_home(
 def child_process(monkeypatch: pytest.MonkeyPatch) -> None:
     popen = subprocess.Popen
 
+    monkeypatch.setattr(
+        runner_settings,
+        "image_metadata",
+        lambda _provider, name: {"id": "synthetic-image", "names": [name], "available": True},
+    )
+
     def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
-        args = command[-2:] if command[-1] == "--cleanup" else command[-1:]
+        args = command[-2:] if command[-1] in {"--cleanup", "--resume"} else command[-1:]
         return popen([sys.executable, "-u", "-c", CHILD, *args], **kwargs)
 
     monkeypatch.setattr(jobs.subprocess, "Popen", launch)
@@ -123,6 +138,116 @@ def settled(manager: jobs.ScanJobManager, name: str) -> dict[str, Any]:
 
 
 @pytest.mark.usefixtures("child_process")
+@pytest.mark.parametrize("runner", ["local", "e2b"])
+def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # noqa: PLR0915
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str
+) -> None:
+    monkeypatch.setenv("E2B_API_KEY", "synthetic-provider-key")
+    monkeypatch.setenv("NATSUHAT_REMOTE_MAX_CONCURRENT", "1")
+    name = runner + "-saved-checkpoint"
+    directory = tmp_path / "natsuhat_runs" / name
+    state = directory / ".state"
+    state.mkdir(parents=True)
+    job = {
+        **REQUEST,
+        "id": name,
+        "runner": runner,
+        "target": "https://hold.example.test",
+        "status": "stopped",
+        "start_time": "2026-01-01T10:00:00Z",
+        "end_time": "2026-01-01T10:05:00Z",
+        "exit_code": 130,
+        "error": None,
+    }
+    (directory / "job.json").write_text(json.dumps(job))
+    record = {"status": "stopped", "llm_usage": {"cost": 1.23}}
+    (directory / "run.json").write_text(json.dumps(record))
+    (directory / "job.log").write_text("ORIGINAL LOG\n")
+    findings = '[{"id":"vuln-0001","title":"Saved finding"}]'
+    (directory / "vulnerabilities.json").write_text(findings)
+    checkpoint = {"parent_of": {"root": None}, "statuses": {"root": "running"}}
+    (state / "agents.json").write_text(json.dumps(checkpoint))
+    with sqlite3.connect(state / "agents.db") as database:
+        database.execute("CREATE TABLE history (content TEXT)")
+        database.execute("INSERT INTO history VALUES ('SAVED CONVERSATION')")
+    if runner == "e2b":
+        (directory / "runner.json").write_text(
+            json.dumps({"cleanup": "paused", "sandbox_id": "same-vm", "phase": "Stopped"})
+        )
+    httpd, url, token = serve(
+        tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
+    )
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    endpoint = f"/api/jobs/{name}/resume"
+    manager = httpd.job_manager
+    try:
+        assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["can_resume"]
+        assert request(url, endpoint, body={"authorized": True})[0] == 403
+        assert request(url, endpoint, cookie, {})[0] == 400
+        assert (
+            request(url, endpoint, cookie, {"authorized": True}, Origin="https://evil.test")[0]
+            == 403
+        )
+        assert request(url, "/api/jobs/missing/resume", cookie, {"authorized": True})[0] == 404
+        for budget in (0, -2, True, float("inf")):
+            assert (
+                request(url, endpoint, cookie, {"authorized": True, "max_budget_usd": budget})[0]
+                == 400
+            )
+        for budget in (1.22, 1.23):
+            assert (
+                request(url, endpoint, cookie, {"authorized": True, "max_budget_usd": budget})[0]
+                == 409
+            )
+        (state / "agents.json").unlink()
+        assert not request(url, "/api/jobs", cookie)[1]["jobs"][0]["can_resume"]
+        assert request(url, endpoint, cookie, {"authorized": True})[0] == 409
+        (state / "agents.json").write_text(json.dumps(checkpoint))
+        (directory / "run.json").write_text('{"status":"completed"}')
+        assert request(url, endpoint, cookie, {"authorized": True})[0] == 409
+        (directory / "run.json").write_text(json.dumps(record))
+        if runner == "e2b":
+            saved = (directory / "runner.json").read_text()
+            (directory / "runner.json").write_text(
+                json.dumps({"cleanup": "paused", "results_pending": True, "sandbox_id": "same-vm"})
+            )
+            assert request(url, endpoint, cookie, {"authorized": True})[0] == 409
+            (directory / "runner.json").write_text(saved)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            replies = list(
+                pool.map(
+                    lambda _: request(
+                        url, endpoint, cookie, {"authorized": True, "max_budget_usd": 7.5}
+                    ),
+                    range(2),
+                )
+            )
+        assert sorted(status for status, _ in replies) == [202, 409]
+        resumed = next(body["job"] for status, body in replies if status == 202)
+        assert resumed["id"] == name and resumed["start_time"] == job["start_time"]
+        assert resumed["end_time"] is None and resumed["max_budget_usd"] == 7.5
+        assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["can_resume"] is False
+        assert request(url, "/api/jobs", cookie, {**REQUEST, "runner": runner})[0] == 409
+        deadline = time.monotonic() + 3
+        while "Resumed checkpoint" not in (directory / "job.log").read_text():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert (directory / "job.log").read_text().startswith("ORIGINAL LOG\n")
+        assert json.loads((directory / "run.json").read_text())["llm_usage"] == record["llm_usage"]
+        assert (directory / "vulnerabilities.json").read_text() == findings
+        with sqlite3.connect(state / "agents.db") as database:
+            assert database.execute("SELECT content FROM history").fetchall() == [
+                ("SAVED CONVERSATION",)
+            ]
+        assert len(list((tmp_path / "natsuhat_runs").glob("*/job.json"))) == 1
+        assert request(url, f"/api/jobs/{name}/stop", cookie, {})[0] == 200
+        assert settled(manager, name)["status"] == "stopped"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.usefixtures("child_process")
 def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
     httpd, url, token = serve(
         tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
@@ -134,9 +259,13 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
         for path, body in (
             ("/api/jobs", None),
             ("/api/jobs", REQUEST),
+            ("/api/runners/settings", None),
+            ("/api/runners/settings", {}),
+            ("/api/runners/check", {"provider": "e2b"}),
             ("/api/jobs/nope/log", None),
             ("/api/jobs/nope/stop", {}),
             ("/api/jobs/nope/rerun", {"authorized": True}),
+            ("/api/jobs/nope/resume", {"authorized": True}),
         ):
             assert request(url, path, body=body)[0] == 403
         assert request(url, "/api/jobs", cookie, REQUEST, Origin="https://evil.test")[0] == 403
@@ -156,6 +285,8 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
             {"max_budget_usd": True},
             {"scan_mode": "arbitrary"},
             {"target": "--config=/tmp/x"},
+            {"source": {"kind": []}},
+            {"source": "not-a-source"},
         ):
             assert request(url, "/api/jobs", cookie, {**REQUEST, **invalid})[0] == 400
         assert request(url, "/api/jobs/nope/stop", cookie, {})[0] == 404
@@ -202,6 +333,147 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_runner_settings_persist_with_workspace_and_environment_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("E2B_API_KEY", "private-provider-key")
+    monkeypatch.setenv("NATSUHAT_E2B_TEMPLATE", "environment-template")
+    base = tmp_path / "natsuhat_runs"
+    httpd, url, token = serve(base / ".dashboard", manage_scans=True, open_browser=False)
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    saved = {
+        "default_runner": "daytona",
+        "e2b_template": "saved-template",
+        "daytona_snapshot": "saved-snapshot",
+    }
+    try:
+        initial = request(url, "/api/runners/settings", cookie)[1]
+        assert initial["images"][0]["template"] == "environment-template"
+        assert initial["images"][0]["selection_source"] == "environment"
+        assert "private-provider-key" not in json.dumps(initial)
+        endpoint = "/api/runners/settings"
+        assert request(url, endpoint, cookie, saved, Origin="https://evil.test")[0] == 403
+        for invalid in (
+            {"default_runner": []},
+            {"e2b_template": "https://evil.test"},
+            {"daytona_snapshot": "a\nb"},
+            {"e2b_template": 42},
+        ):
+            assert request(url, endpoint, cookie, {**saved, **invalid})[0] == 400
+        assert request(url, endpoint, cookie, saved)[0] == 200
+        assert request(url, "/api/jobs", cookie)[1]["default_runner"] == "daytona"
+        path = dashboard_profiles_path(tmp_path).with_name("runner-settings.json")
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert not list(base.glob("*/job.json"))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    restored = jobs.ScanJobManager(base)
+    try:
+        state = restored.runner_settings.public()
+        assert state["effective_default_runner"] == "daytona"
+        assert state["images"][0]["template"] == "saved-template"
+        assert state["images"][0]["selection_source"] == "dashboard"
+        assert state["images"][1]["template"] == "saved-snapshot"
+        assert state["images"][0]["check"] is None
+        restored.runner_settings.update(
+            {"default_runner": None, "e2b_template": "", "daytona_snapshot": ""}
+        )
+        assert restored.runner_settings.public()["images"][0]["template"] == "environment-template"
+        assert restored.configuration()["default_runner"] == "e2b"
+        assert (
+            runner_settings.RunnerSettings(tmp_path / "another-workspace").public()["e2b_template"]
+            == ""
+        )
+    finally:
+        restored.close()
+
+
+@pytest.mark.parametrize(
+    "image,availability,compatibility,blocked",
+    [
+        ("missing", "missing", "unverified", True),
+        ("old-id", "available", "incompatible", True),
+        ("matching", "available", "name_matches", False),
+        ("custom", "available", "unverified", False),
+        ("building", "unavailable", "unverified", True),
+        ("error", "error", "unverified", True),
+        ("no-key", "unconfigured", "unverified", True),
+    ],
+)
+@pytest.mark.usefixtures("child_process")
+def test_runner_preflight_blocks_missing_and_stale_images_before_job_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    image: str,
+    availability: str,
+    compatibility: str,
+    blocked: bool,
+) -> None:
+    monkeypatch.setenv("E2B_API_KEY", "private-provider-key")
+    monkeypatch.delenv("NATSUHAT_E2B_TEMPLATE", raising=False)
+    if image == "no-key":
+        monkeypatch.delenv("E2B_API_KEY")
+    # Exercise the real metadata parser; replace only the provider's HTTP response.
+    monkeypatch.setattr(runner_settings, "image_metadata", _REAL_IMAGE_METADATA)
+    required = "natsuhat-ready-" + "a" * 16
+    monkeypatch.setattr(runner_settings, "runner_revision", lambda: "a" * 64)
+
+    def metadata_response(*_args: Any, **_kwargs: Any) -> httpx.Response:
+        if image == "error":
+            raise httpx.ConnectError("private-provider-key must never leak")
+        selected = "custom" if image in {"custom", "building"} else required
+        aliases = ["natsuhat-ready-" + "b" * 16] if image == "old-id" else [selected]
+        rows = (
+            []
+            if image == "missing"
+            else [
+                {
+                    "templateID": "old-id",
+                    "aliases": aliases,
+                    "names": [],
+                    "buildStatus": "building" if image == "building" else "ready",
+                }
+            ]
+        )
+        return httpx.Response(
+            200, json=rows, request=httpx.Request("GET", "https://provider.test/templates")
+        )
+
+    monkeypatch.setattr(runner_settings.httpx, "get", metadata_response)
+    base = tmp_path / "natsuhat_runs"
+    manager = jobs.ScanJobManager(base)
+    try:
+        selected = (
+            "old-id" if image == "old-id" else "custom" if image in {"custom", "building"} else ""
+        )
+        manager.runner_settings.update(
+            {"default_runner": "e2b", "e2b_template": selected, "daytona_snapshot": ""}
+        )
+        check = manager.runner_settings.check("e2b")
+        assert (check["availability"], check["compatibility"]) == (availability, compatibility)
+        assert "private-provider-key" not in json.dumps(check)
+        if blocked:
+            with pytest.raises(jobs.JobError):
+                manager.start({**REQUEST, "runner": "e2b"})
+            assert manager.list() == []
+            assert not list(base.glob("*/job.json"))
+        else:
+            job = manager.start(
+                {**REQUEST, "runner": "e2b", "target": "https://authorized.test/exit/0"}
+            )
+            assert job["runner_template"] == (selected or required)
+            assert settled(manager, job["id"])["status"] == "completed"
+        # A source update invalidates a cached name match without waiting for expiry.
+        if image == "matching":
+            monkeypatch.setattr(runner_settings, "runner_revision", lambda: "c" * 64)
+            assert manager.runner_settings.public()["images"][0]["check"] is None
+            with pytest.raises(jobs.JobError):
+                manager.start({**REQUEST, "runner": "e2b"})
+    finally:
+        manager.close()
 
 
 def test_delete_scan_http_contract(tmp_path: Path) -> None:
@@ -674,6 +946,18 @@ def test_job_worker_preserves_cli_options_and_run_identity(
     assert record["targets_info"][0]["original"] == REQUEST["target"]
     assert record["instruction"] == "Focus on object ownership."
     assert config.read_text() == '{"env": {"NATSUHAT_LLM_INPUT_COST_PER_MTOK": "99"}}'
+    state = directory / ".state"
+    state.mkdir()
+    (state / "agents.json").write_text('{"parent_of":{"root":null}}')
+    record["llm_usage"] = {"cost": 2.47}
+    (directory / "run.json").write_text(json.dumps(record))
+    # A resume reuses the persisted instruction; it must not inject the same
+    # instructions.txt as a new user message or re-run fresh target setup.
+    worker.run_job(directory, resume=True)
+    assert json.loads((directory / "run.json").read_text()) == record
+    assert "--resume=" + name in worker.sys.argv
+    assert not any(arg.startswith("--target") for arg in worker.sys.argv)
+    assert "--instruction-file" not in worker.sys.argv
 
 
 @pytest.mark.usefixtures("child_process")
@@ -997,3 +1281,75 @@ def test_failed_profile_migration_retains_legacy_copy(
     manager.close()
     assert not legacy.exists()
     assert json.loads(dashboard_profiles_path(tmp_path).read_text()) == json.loads(original)
+
+
+@pytest.mark.parametrize("runner", ["local", "e2b", "daytona"])
+@pytest.mark.usefixtures("child_process")
+def test_zip_http_upload_job_rerun_and_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str
+) -> None:
+    monkeypatch.setenv("E2B_API_KEY", "synthetic-provider-key")
+    monkeypatch.setenv("DAYTONA_API_KEY", "synthetic-provider-key")
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        bundle.writestr("app/main.py", "print('fixture only')")
+    raw = output.getvalue()
+    httpd, url, token = serve(
+        tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
+    )
+    cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
+    manager = httpd.job_manager
+    try:
+        with httpx.Client(base_url=url, headers={"Cookie": cookie}) as client:
+            endpoint = "/api/sources/upload"
+            headers = {"Content-Type": "application/zip", "X-Source-Filename": "local-code.zip"}
+            assert (
+                client.post(endpoint, content=raw, headers={**headers, "Cookie": ""}).status_code
+                == 403
+            )
+            assert (
+                client.post(
+                    endpoint, content=raw, headers={**headers, "Origin": "https://evil.test"}
+                ).status_code
+                == 403
+            )
+            assert (
+                client.post(
+                    endpoint, content=raw, headers={**headers, "Content-Type": "text/plain"}
+                ).status_code
+                == 415
+            )
+            response = client.post(endpoint, content=raw, headers=headers)
+            assert response.status_code == 201
+            source = response.json()
+            assert source["files"] == 1
+            assert client.get("/api/jobs").json()["jobs"] == []
+            body = {
+                **REQUEST,
+                "runner": runner,
+                "source": {"kind": "zip", "upload_id": source["upload_id"]},
+            }
+            assert client.post("/api/jobs", json={**body, "authorized": False}).status_code == 400
+            created = client.post("/api/jobs", json=body)
+            assert created.status_code == 202
+            job = created.json()["job"]
+            settled(manager, job["id"])
+            assert job["source"]["sha256"] == source["sha256"]
+            assert job["target"] == "local-code.zip"
+            record = client.get("/api/run", params={"run": job["id"]}).json()
+            assert record["source"] == job["source"]
+            rerun = client.post(f"/api/jobs/{job['id']}/rerun", json={"authorized": True})
+            assert rerun.status_code == 202
+            second = rerun.json()["job"]
+            settled(manager, second["id"])
+            assert second["source"] == job["source"]
+            assert second["id"] != job["id"]
+            assert (
+                client.post(f"/api/runs/{job['id']}/delete", json={"confirmed": True}).status_code
+                == 200
+            )
+            assert not manager.sources.directory(job["id"]).exists()
+            assert manager.sources.directory(second["id"]).exists()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

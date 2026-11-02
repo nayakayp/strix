@@ -208,6 +208,7 @@ export async function fetchCapabilities(): Promise<Capabilities> {
 export interface ScanJob {
   id: string;
   target: string;
+  source?: SourceSnapshot;
   scan_mode: string;
   max_budget_usd: number;
   status: string;
@@ -216,6 +217,8 @@ export interface ScanJob {
   exit_code: number | null;
   error: string | null;
   has_run: boolean;
+  can_resume?: boolean;
+  resume_unavailable_reason?: string | null;
   llm_model?: string | null;
   runner?: "local" | "e2b" | "daytona";
   remote?: { phase: string; sandbox_id?: string; cleanup: string; last_sync?: string; sync_error?: string | null; resume_count?: number; results_pending?: boolean };
@@ -224,9 +227,55 @@ export interface ScanJob {
 export interface JobsPayload {
   jobs: ScanJob[];
   runners: { id: string; name: string; configured: boolean }[];
-  default_runner: "local" | "e2b";
+  default_runner: "local" | "e2b" | "daytona";
   max_remote_concurrent: number;
   remote_timeout_seconds: number;
+}
+
+export interface RunnerCheck {
+  template: string;
+  template_id: string | null;
+  build_id: string | null;
+  revision: string | null;
+  resolved_template: string | null;
+  release: string | null;
+  checked_at: string;
+  availability: "available" | "missing" | "unavailable" | "unconfigured" | "error";
+  compatibility: "revision_matches" | "name_matches" | "incompatible" | "unverified";
+  message: string;
+}
+
+export interface RunnerSettings {
+  default_runner: "local" | "e2b" | "daytona" | null;
+  effective_default_runner: "local" | "e2b" | "daytona";
+  e2b_template: string;
+  daytona_snapshot: string;
+  required_revision: string;
+  required_template: string;
+  images: {
+    id: "e2b" | "daytona";
+    name: string;
+    configured: boolean;
+    template: string;
+    selection_source: "dashboard" | "environment" | "automatic";
+    check: RunnerCheck | null;
+  }[];
+}
+
+export async function fetchRunnerSettings(): Promise<RunnerSettings> {
+  return await getJson("/api/runners/settings") as RunnerSettings;
+}
+
+export async function saveRunnerSettings(body: Pick<RunnerSettings, "default_runner" | "e2b_template" | "daytona_snapshot">): Promise<RunnerSettings> {
+  const result = await postJson("/api/runners/settings", body);
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not save runner settings."));
+  return result.data as unknown as RunnerSettings;
+}
+
+export async function checkRunner(provider: string): Promise<RunnerCheck> {
+  const result = await postJson("/api/runners/check", { provider });
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not check runner image."));
+  return result.data as unknown as RunnerCheck;
 }
 
 export async function fetchJobState(): Promise<JobsPayload> {
@@ -248,6 +297,11 @@ export async function rerunJob(id: string): Promise<void> {
   if (!result.ok) throw new Error(String(result.data.error ?? "Could not rerun scan."));
 }
 
+export async function resumeJob(id: string, max_budget_usd: number): Promise<void> {
+  const result = await postJson(`/api/jobs/${encodeURIComponent(id)}/resume`, { authorized: true, max_budget_usd });
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not resume scan."));
+}
+
 export async function stopJob(id: string): Promise<void> {
   const result = await postJson(`/api/jobs/${encodeURIComponent(id)}/stop`, {});
   if (!result.ok) throw new Error(String(result.data.error ?? "Could not stop scan."));
@@ -261,6 +315,59 @@ export async function deleteRun(name: string): Promise<void> {
 export async function fetchJobLog(id: string): Promise<string> {
   const data = await getJson(`/api/jobs/${encodeURIComponent(id)}/log`) as { text: string };
   return data.text;
+}
+
+export interface SourceSnapshot {
+  kind: "zip" | "github";
+  filename: string;
+  sha256: string;
+  files: number;
+  size: number;
+  warnings: string[];
+  repository?: string;
+  repository_id?: number;
+  ref?: string;
+  commit?: string;
+  upload_id?: string;
+}
+
+export type ScanSource = { kind: "zip"; upload_id: string } | { kind: "github"; repository_id: number; ref: string };
+export interface GithubRepository { id: number; full_name: string; default_branch: string; private: boolean }
+export interface GithubState { configured: boolean; connected: boolean; repositories: GithubRepository[]; available: GithubRepository[] }
+
+export async function fetchGithub(refresh = false): Promise<GithubState> {
+  return await getJson(refresh ? "/api/github/refresh" : "/api/github") as GithubState;
+}
+
+export async function checkGithubSource(repository_id: number, ref: string): Promise<{ repository_id: number; ref: string; commit: string }> {
+  const result = await postJson("/api/github/check", { repository_id, ref });
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not check this repository. Check again before scanning."));
+  return result.data as unknown as { repository_id: number; ref: string; commit: string };
+}
+
+export async function updateGithub(action: string, id?: number): Promise<GithubState & { url?: string }> {
+  const result = await postJson(`/api/github/${action}`, { id });
+  if (!result.ok) throw new Error(String(result.data.error ?? "Could not update GitHub connection."));
+  return result.data as unknown as GithubState & { url?: string };
+}
+
+export function uploadSource(file: File, progress: (value: number) => void, signal: AbortSignal): Promise<SourceSnapshot> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", "/api/sources/upload");
+    request.setRequestHeader("Content-Type", "application/zip");
+    request.setRequestHeader("X-Source-Filename", encodeURIComponent(file.name));
+    request.responseType = "json";
+    request.upload.onprogress = event => { if (event.lengthComputable) progress(Math.round(event.loaded / event.total * 100)); };
+    const abort = () => request.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    request.onloadend = () => signal.removeEventListener("abort", abort);
+    request.onload = () => request.status === 201 ? resolve(request.response as SourceSnapshot) : reject(new Error(request.response?.error ?? "ZIP upload failed."));
+    request.onerror = () => reject(new Error("ZIP upload failed. Check your connection."));
+    request.onabort = () => reject(new DOMException("Upload cancelled", "AbortError"));
+    if (signal.aborted) reject(new DOMException("Upload cancelled", "AbortError"));
+    else request.send(file);
+  });
 }
 
 export interface ModelPrices {
