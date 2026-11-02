@@ -5,14 +5,12 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import httpx
 import litellm
 import pytest
 from agents.items import ModelResponse
-from agents.models import _openai_shared
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.models.interface import Model
 from agents.models.openai_provider import shared_http_client
@@ -27,7 +25,8 @@ from openai import APIStatusError, APITimeoutError, PermissionDeniedError
 from openai.types.responses import Response, ResponseCompletedEvent, ResponseCreatedEvent
 from openai.types.responses.response import IncompleteDetails
 
-from natsuhat.config import codex, models
+from natsuhat.config import codex, loader
+from natsuhat.core.inputs import make_model_settings
 from natsuhat.llm import request_log
 
 
@@ -1482,17 +1481,38 @@ def test_failure_text_plain_exception_unchanged() -> None:
     assert request_log.failure_text(RuntimeError("")) == "RuntimeError"
 
 
-def test_extra_headers_openai_client_rides_the_observed_shared_client(
+@pytest.mark.asyncio
+async def test_provider_overrides_are_redacted_before_logging_and_bounding(
     monkeypatch: pytest.MonkeyPatch,
+    captured: list[LlmRequestEvent],
 ) -> None:
-    request_log.install()
-    monkeypatch.setattr(_openai_shared, "_default_openai_client", None)
-    settings = SimpleNamespace(api_key="k", api_base="https://gateway.example/v1")
-    models._register_openai_client_with_headers(cast("Any", settings), {"X-Gateway-Feature": "svc"})
-    client = _openai_shared.get_default_openai_client()
-    assert client is not None
-    assert client._client is shared_http_client()
-    assert request_log.record_http_reply in client._client.event_hooks["response"]
+    settings = loader.load_settings().model_copy(deep=True)
+    secret = "private-header-" + "z" * 600
+    settings.llm.extra_headers = {"X-Secret": secret}
+    settings.llm.extra_body = {"routing": {"token": "private-body-value"}}
+    monkeypatch.setattr(loader, "_cached", settings)
+    response = httpx.Response(
+        403, request=httpx.Request("POST", "https://fixture.test/v1"), headers={"X-Echo": secret}
+    )
+    exc = PermissionDeniedError(
+        "Rejected " + secret, response=response, body={"echo": "private-body-value"}
+    )
+    model = request_log.RequestLoggingModel(
+        _Inner(exc=exc), model_name="gpt-5", provider="openai", base_url=None
+    )
+    args = list(_CALL_ARGS)
+    args[2] = make_model_settings(
+        None,
+        model_name="gpt-5",
+        extra_headers=settings.llm.extra_headers,
+        extra_body=settings.llm.extra_body,
+    )
+    with pytest.raises(PermissionDeniedError):
+        await model.get_response(*args, **_CALL_KWARGS)
+    serialized = json.dumps(captured[0].to_dict())
+    assert secret[:128] not in serialized and "private-body-value" not in serialized
+    assert "[redacted]" in serialized
+    assert "private-header-" not in request_log.failure_text(exc)
 
 
 def test_codex_client_is_observed(monkeypatch: pytest.MonkeyPatch) -> None:

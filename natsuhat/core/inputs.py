@@ -266,6 +266,8 @@ def make_model_settings(
         reasoning_effort is not None
         and reasoning_effort != "none"
         and model_supports_reasoning(model_name)
+        # Raw provider reasoning settings (including false/null) are explicit.
+        and not (extra_body and {"reasoning", "reasoning_effort"}.intersection(extra_body))
     ):
         model_settings = model_settings.resolve(
             _reasoning_settings(reasoning_effort, extra_body),

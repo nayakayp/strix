@@ -33,6 +33,7 @@ from natsuhat.interface.utils import (
     write_fetched_collection,
 )
 from natsuhat.telemetry import posthog, scarf
+from natsuhat.telemetry.redaction import redact_text
 from natsuhat.utils.api_spec import (
     SpecParseError,
     fetch_postman_collection,
@@ -57,7 +58,7 @@ class ModelConnectionError(RuntimeError):
     """An ordinary model preflight failure, annotated with its model route."""
 
     def __init__(self, model_name: str, cause: BaseException) -> None:
-        super().__init__(str(cause))
+        super().__init__(redact_text(str(cause)))
         self.model_name = model_name
 
 

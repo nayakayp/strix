@@ -65,13 +65,25 @@ def test_prepared_runner_scans_without_installing_and_rejects_stale_images(  # n
         "  assert z.read('code/app.py') == b'SOURCE TRANSFER FIXTURE'\n"
         "with (directory/'launches').open('a') as log: log.write('launched\\n')\n"
         "(directory/'run.json').write_text(json.dumps({'status':'completed',"
-        "'target':job['target']}))\nprint('PREPARED_SCAN_EXECUTED')\nsys.exit(2)\n"
+        "'target':job['target']}))\n"
+        "connection=json.loads(Path(os.environ['NATSUHAT_DASHBOARD_LLM_PATH']).read_text())\n"
+        "assert connection['extra_headers']=={'X-Tenant':'private-routing-value'}\n"
+        "assert connection['extra_body']=={'reasoning':{'enabled':False},'uncensored':True}\n"
+        "print('PREPARED_SCAN_EXECUTED private-routing-value private-test-key')\nsys.exit(2)\n"
     )
     python = vm_root / "natsuhat/.venv/bin/python"
     python.parent.mkdir(parents=True)
     python.symlink_to(sys.executable)
     monkeypatch.setenv(
-        "NATSUHAT_DASHBOARD_LLM", json.dumps({"model": "synthetic", "api_key": "private-test-key"})
+        "NATSUHAT_DASHBOARD_LLM",
+        json.dumps(
+            {
+                "model": "synthetic",
+                "api_key": "private-test-key",
+                "extra_headers": {"X-Tenant": "private-routing-value"},
+                "extra_body": {"reasoning": {"enabled": False}, "uncensored": True},
+            }
+        ),
     )
 
     class Sandbox:
@@ -150,6 +162,9 @@ def test_prepared_runner_scans_without_installing_and_rejects_stale_images(  # n
     }
     assert (vm_root / f"natsuhat/natsuhat_runs/{job['id']}/launches").read_text() == "launched\n"
     assert (vm_root / "llm.json").stat().st_mode & 0o777 == 0o600
+    text = (controller / "remote.log").read_text()
+    assert "PREPARED_SCAN_EXECUTED" in text
+    assert "private-routing-value" not in text and "private-test-key" not in text
     if with_source:
         assert (vm_root / "source.zip").stat().st_mode & 0o777 == 0o600
         assert not (controller / "source.zip").exists()

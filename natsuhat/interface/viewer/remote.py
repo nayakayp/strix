@@ -29,6 +29,7 @@ from natsuhat.interface.viewer.llm_settings import JobError
 from natsuhat.interface.viewer.remote_snapshot import is_result
 from natsuhat.interface.viewer.sources import SourceStore
 from natsuhat.report.writer import atomic_write_text
+from natsuhat.telemetry.redaction import provider_secrets, redact_text
 
 
 if TYPE_CHECKING:
@@ -448,8 +449,7 @@ class RemoteRun:
                     f"tail -c 16384 /home/runner/{phase_id}.log "
                     f"/home/runner/{phase_id}.bootstrap.log 2>/dev/null || true"
                 )
-                for secret in self.redactions:
-                    tail = tail.replace(secret, "[redacted]")
+                tail = redact_text(tail, self.redactions)
                 atomic_write_text(self.run_dir / "remote.log", tail)
                 if results:
                     self.sync()
@@ -495,7 +495,7 @@ class RemoteRun:
         connection = settings.llm.model_copy(update=override).model_dump()
         if not connection.get("api_key") or not connection.get("model"):
             raise JobError("Remote scans require a configured API-key LLM connection.")
-        self.redactions = [str(connection["api_key"])]
+        self.redactions = provider_secrets(connection)
         self.sandbox = RemoteSandbox(
             self.job["runner"], self.job["id"], self.job.get("runner_template")
         )

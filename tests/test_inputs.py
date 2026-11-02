@@ -401,14 +401,21 @@ def test_make_model_settings_extra_body_merges_with_max_reasoning_field() -> Non
     assert settings.extra_body == {"safety_identifier": "user-hash", "reasoning_effort": "max"}
 
 
-def test_make_model_settings_max_reasoning_overrides_extra_body_reasoning_field() -> None:
+@pytest.mark.parametrize(
+    "extra_body",
+    [{"reasoning_effort": "low"}, {"reasoning": {"enabled": False}}, {"reasoning": None}],
+)
+def test_make_model_settings_explicit_reasoning_overrides_automatic_effort(
+    extra_body: dict[str, Any],
+) -> None:
     settings = make_model_settings(
         "max",
         model_name="deepseek/deepseek-v4-flash",
-        extra_body={"reasoning_effort": "low"},
+        extra_body=extra_body,
     )
 
-    assert settings.extra_body == {"reasoning_effort": "max"}
+    assert settings.extra_body == extra_body
+    assert settings.reasoning is None
 
 
 def test_make_model_settings_does_not_mutate_caller_extra_body() -> None:

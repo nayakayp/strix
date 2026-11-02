@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from openai import AsyncOpenAI
     from openai.types.responses.response_prompt_param import ResponsePromptParam
 
-    from natsuhat.config.settings import ApiType, LlmSettings, ReasoningEffort, Settings
+    from natsuhat.config.settings import ApiType, ReasoningEffort, Settings
 
 
 logger = logging.getLogger(__name__)
@@ -722,7 +722,8 @@ def configure_sdk_model_defaults(settings: Settings) -> None:
         os.environ["OPENAI_BASE_URL"] = llm.api_base
         _configure_litellm_default("api_base", llm.api_base)
     configure_sdk_api_route(llm.model or "", settings)
-    _configure_extra_headers(llm)
+    # Extra headers belong to each request's ModelSettings, not shared clients:
+    # a dedicated dedupe provider must not inherit the main provider's secrets.
 
 
 def configure_sdk_api_route(model_name: str, settings: Settings) -> None:
@@ -918,47 +919,6 @@ def _configure_attribution(model_name: str | None) -> None:
     existing: dict[str, str] = current if isinstance(current, dict) else {}
     remaining = {k: v for k, v in existing.items() if k not in OPENROUTER_ATTRIBUTION_HEADERS}
     litellm.headers = {**remaining, **attribution_headers(model_name)} or None  # type: ignore[assignment]
-
-
-def _configure_extra_headers(llm: LlmSettings) -> None:
-    """Send user-provided default headers on every LLM request.
-
-    Some OpenAI-compatible endpoints require extra HTTP headers (e.g. request
-    attribution or tenant routing) alongside the bearer token. Users supply
-    them via ``LLM_EXTRA_HEADERS``; they are applied to both routing paths:
-    the LiteLLM route (``litellm.headers``) and the SDK-native OpenAI route
-    (a default client carrying ``default_headers``), so they take effect
-    regardless of the ``NATSUHAT_LLM`` prefix.
-    """
-    headers = llm.extra_headers
-    if not headers:
-        return
-    _merge_litellm_headers(headers)
-    _register_openai_client_with_headers(llm, headers)
-
-
-def _merge_litellm_headers(headers: dict[str, str]) -> None:
-    import litellm
-
-    current: object = litellm.headers
-    existing: dict[str, str] = current if isinstance(current, dict) else {}
-    litellm.headers = {**existing, **headers}  # type: ignore[assignment]
-
-
-def _register_openai_client_with_headers(llm: LlmSettings, headers: dict[str, str]) -> None:
-    from agents import set_default_openai_client
-    from agents.models.openai_provider import shared_http_client
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        api_key=llm.api_key or "not-needed",
-        base_url=llm.api_base,
-        default_headers=dict(headers),
-        # The SDK's shared client is the one the request log observes for
-        # reply status, headers and provider request ids.
-        http_client=shared_http_client(),
-    )
-    set_default_openai_client(client, use_for_tracing=False)
 
 
 def _register_litellm_cost_callback() -> None:

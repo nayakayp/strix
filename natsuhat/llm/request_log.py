@@ -46,6 +46,8 @@ from openai import APIError, APIStatusError
 from openai.types.responses import ResponseCompletedEvent
 from pydantic import BaseModel
 
+from natsuhat.telemetry.redaction import redact_text
+
 
 if TYPE_CHECKING:
     from agents.agent_output import AgentOutputSchemaBase
@@ -234,7 +236,7 @@ def emit(event: LlmRequestEvent) -> None:
 
 
 def clean_error_message(exc: BaseException) -> str:
-    message = str(exc).strip() or type(exc).__name__
+    message = redact_text(str(exc).strip() or type(exc).__name__)
     if len(message) > ERROR_MESSAGE_MAX_CHARS:
         message = message[: ERROR_MESSAGE_MAX_CHARS - 1] + "…"
     return message
@@ -322,7 +324,7 @@ def headers_from_response(headers: Mapping[str, Any] | None) -> dict[str, str] |
     for key, value in headers.items():
         if isinstance(value, bool) or not isinstance(value, str | int | float):
             continue
-        text = str(value).strip()
+        text = redact_text(str(value).strip())
         if not text:
             continue
         name = _normalize_header_name(key)
@@ -338,7 +340,8 @@ def _bounded_value(value: object, depth: int) -> object:  # noqa: PLR0911
     if value is None or isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):
-        return value[:DETAILS_MAX_STRING]
+        # Truncating first would preserve an unredacted credential prefix.
+        return redact_text(value)[:DETAILS_MAX_STRING]
     if isinstance(value, datetime | date):
         return value.isoformat()
     if depth >= DETAILS_MAX_DEPTH:
@@ -361,7 +364,7 @@ def _bounded_value(value: object, depth: int) -> object:  # noqa: PLR0911
     if isinstance(value, Sequence | set | frozenset):
         items = list(cast("Sequence[object]", value))[:DETAILS_MAX_ITEMS]
         return [_bounded_value(item, depth + 1) for item in items]
-    return str(value)[:DETAILS_MAX_STRING]
+    return redact_text(str(value))[:DETAILS_MAX_STRING]
 
 
 def bound_details(value: object) -> dict[str, Any] | None:
@@ -827,7 +830,7 @@ def _litellm_failure(
     error_type = error_type or _str_or_none(error_info.get("error_class")) or "Exception"
     if error_message is None:
         raw = _str_or_none(error_info.get("error_message")) or _str_or_none(slo.get("error_str"))
-        error_message = raw[:ERROR_MESSAGE_MAX_CHARS] if raw else error_type
+        error_message = redact_text(raw)[:ERROR_MESSAGE_MAX_CHARS] if raw else error_type
     provider = _str_or_none(error_info.get("llm_provider"))
     if provider:
         error.setdefault("llm_provider", provider)
@@ -1424,7 +1427,7 @@ def failure_text(exc: BaseException) -> str:
     request_id = request_id or request_id_from_reply(_exception_headers(exc), text)
     if request_id and request_id not in text:
         text = f"{text} [provider request id: {request_id}]"
-    return text
+    return redact_text(text)
 
 
 __all__ = [

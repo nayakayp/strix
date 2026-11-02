@@ -4,8 +4,12 @@ import asyncio
 
 import pytest
 
-from natsuhat.config import Settings
-from natsuhat.interface.scan_setup import check_header_safe_credentials, preflight_model_connection
+from natsuhat.config import Settings, loader
+from natsuhat.interface.scan_setup import (
+    ModelConnectionError,
+    check_header_safe_credentials,
+    preflight_model_connection,
+)
 
 
 _ENV_KEYS = (
@@ -40,6 +44,17 @@ def test_ascii_credentials_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     check_header_safe_credentials(settings)
+
+
+def test_preflight_error_does_not_echo_custom_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(monkeypatch, LLM_EXTRA_HEADERS='{"X-Private": "private-routing-key"}')
+    settings.llm.extra_body = {"nested": {"token": "body-token"}}
+    monkeypatch.setattr(loader, "_cached", settings)
+    error = ModelConnectionError(
+        "openai/model", RuntimeError("Rejected private-routing-key body-token")
+    )
+    assert str(error) == "Rejected [redacted] [redacted]"
+    assert error.model_name == "openai/model"
 
 
 def test_smart_quote_in_api_key_is_named_without_leaking_the_key(

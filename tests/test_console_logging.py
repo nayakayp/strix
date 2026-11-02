@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from natsuhat.config import loader
 from natsuhat.telemetry import logging as natsuhat_logging
 
 
@@ -64,6 +65,31 @@ def test_console_logging_follows_the_current_stderr(monkeypatch: pytest.MonkeyPa
 
     assert first.getvalue() == ""
     assert "after swap" in second.getvalue()
+
+
+@pytest.mark.usefixtures("clean_loggers")
+def test_scan_logs_redact_request_overrides_in_arguments_and_tracebacks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = loader.load_settings().model_copy(deep=True)
+    settings.llm.extra_headers = {"X-Private": "header-credential"}
+    settings.llm.extra_body = {"nested": {"token": "body-credential"}}
+    monkeypatch.setattr(loader, "_cached", settings)
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    teardown = natsuhat_logging.setup_scan_logging(tmp_path)
+    try:
+        try:
+            raise ValueError("Gateway echoed body-credential")  # noqa: TRY301 - exercise traceback redaction
+        except ValueError:
+            logging.getLogger("natsuhat.test").exception("Failed with %s", "header-credential")
+    finally:
+        teardown()
+    for text in (err.getvalue(), (tmp_path / "natsuhat.log").read_text()):
+        assert "header-credential" not in text and "body-credential" not in text
+        assert "Failed with [redacted]" in text
+        assert "ValueError: Gateway echoed [redacted]" in text
 
 
 @pytest.mark.usefixtures("clean_loggers")

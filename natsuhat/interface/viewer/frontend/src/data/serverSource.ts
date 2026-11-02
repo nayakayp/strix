@@ -384,6 +384,8 @@ export interface LlmProvider {
   model: string;
   has_api_key: boolean;
   prices: Record<string, ModelPrices>;
+  extra_header_names?: string[];
+  extra_body?: Record<string, unknown>;
 }
 
 export interface LlmSettings {

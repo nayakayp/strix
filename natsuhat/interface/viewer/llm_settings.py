@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -30,6 +31,108 @@ class JobError(ValueError):
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
         self.status = status
+
+
+_RESERVED_HEADERS = {
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "host",
+    "content-length",
+    "content-type",
+    "connection",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "upgrade",
+    "keep-alive",
+    "proxy-connection",
+    "accept-encoding",
+    "cookie",
+    "set-cookie",
+}
+_RESERVED_BODY = {
+    "model",
+    "messages",
+    "input",
+    "instructions",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "functions",
+    "function_call",
+    "stream",
+    "stream_options",
+    "previous_response_id",
+    "conversation",
+    "conversation_id",
+    "prompt",
+    "response_format",
+}
+
+
+def _headers(value: Any, existing: dict[str, Any]) -> dict[str, str]:
+    """Null keeps a saved value; an omitted row removes it. Names ignore case."""
+    if not isinstance(value, dict):
+        raise JobError("Extra headers: provide name/value pairs.")
+    entries = cast("dict[object, Any]", value)
+    if len(entries) > 32:
+        raise JobError("Extra headers: provide at most 32 name/value pairs.")
+    saved = {name.lower(): secret for name, secret in existing.items()}
+    headers: dict[str, str] = {}
+    names: set[str] = set()
+    for name, submitted in entries.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", name)
+            or name.lower() in names
+        ):
+            raise JobError("Extra headers: use valid, unique HTTP header names (case-insensitive).")
+        if name.lower() in _RESERVED_HEADERS:
+            raise JobError(
+                "Extra headers: authentication and transport headers are reserved. "
+                "Use the API key field for authentication."
+            )
+        names.add(name.lower())
+        secret = submitted
+        if secret is None:
+            if name.lower() not in saved:
+                raise JobError("Extra headers: enter a value for each new header.")
+            secret = saved[name.lower()]
+        if (
+            not isinstance(secret, str)
+            or not secret
+            or len(secret) > 4096
+            or secret != secret.strip()
+            or any(ord(char) < 32 or ord(char) > 126 for char in secret)
+        ):
+            raise JobError(
+                "Extra headers: values must be 1-4096 printable ASCII characters "
+                "without surrounding whitespace or newlines."
+            )
+        headers[name] = secret
+    if sum(map(len, headers.values())) > 32768:
+        raise JobError("Extra headers: combined values must not exceed 32 KB.")
+    return headers
+
+
+def _body(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise JobError("Extra body: enter a JSON object, not an array or scalar.")
+    body = cast("dict[str, Any]", value)
+    if _RESERVED_BODY.intersection(body):
+        raise JobError(
+            "Extra body: model, conversation, tools, output format, and streaming fields "
+            "are managed by the scan engine."
+        )
+    try:
+        encoded = json.dumps(body, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        raise JobError("Extra body: use valid JSON with finite numbers.") from None
+    if len(encoded.encode()) > 32768:
+        raise JobError("Extra body: the JSON object must not exceed 32 KB.")
+    return body
 
 
 def _catalog(payload: Any, kind: str) -> dict[str, dict[str, Any]]:
@@ -83,6 +186,8 @@ class Provider(BaseModel):
     api_key: str = Field(default="", max_length=4096, repr=False)
     model: str = Field(default="", max_length=300)
     prices: dict[str, Prices] = Field(default_factory=dict, max_length=1000)
+    extra_headers: dict[str, str] = Field(default_factory=dict, repr=False)
+    extra_body: dict[str, Any] = Field(default_factory=dict, repr=False)
 
     @field_validator("name", "model", "api_key")
     @classmethod
@@ -115,6 +220,23 @@ def _parse_provider(body: dict[str, Any], existing: dict[str, Any] | None) -> Pr
     clear_key = payload.pop("clear_api_key", False)
     if payload.get("id") and existing is None:
         raise JobError("Unknown provider.", 404)
+    saved_headers: dict[str, str] = existing.get("extra_headers", {}) if existing else {}
+    submitted_headers = payload.get("extra_headers", dict.fromkeys(saved_headers))
+    payload["extra_headers"] = _headers(submitted_headers, saved_headers)
+    payload["extra_body"] = _body(
+        payload.get("extra_body", existing.get("extra_body", {}) if existing else {})
+    )
+    if (
+        existing
+        and (
+            payload.get("kind") != existing["kind"]
+            or payload.get("base_url") != existing["base_url"]
+        )
+        and any(value is None for value in submitted_headers.values())
+    ):
+        raise JobError(
+            "Connection changed. Re-enter or remove saved extra header values before saving."
+        )
     if existing and existing["api_key"] and not payload.get("api_key") and not clear_key:
         if (
             payload.get("kind") != existing["kind"]
@@ -185,8 +307,10 @@ class LlmProfiles:
             data = self._read()
             data["providers"] = [
                 {
-                    **{k: v for k, v in p.items() if k != "api_key"},
+                    **{k: v for k, v in p.items() if k not in {"api_key", "extra_headers"}},
                     "has_api_key": bool(p["api_key"]),
+                    "extra_header_names": list(p.get("extra_headers", {})),
+                    "extra_body": p.get("extra_body", {}),
                 }
                 for p in data["providers"]
             ]
@@ -241,8 +365,8 @@ class LlmProfiles:
                 "api_key": provider.api_key or "not-required",
                 "api_base": provider.base_url,
                 "api_type": "chat_completions" if provider.kind == "custom" else None,
-                "extra_headers": None,
-                "extra_body": None,
+                "extra_headers": provider.extra_headers or None,
+                "extra_body": provider.extra_body or None,
                 "input_cost_per_mtok": prices.input,
                 "output_cost_per_mtok": prices.output,
                 "cached_input_cost_per_mtok": prices.cached_input,
@@ -263,6 +387,7 @@ class LlmProfiles:
             suffix = "/v1/models"
         elif kind == "ollama":
             suffix = "/api/tags"
+        headers.update(provider.get("extra_headers", {}))
         models: dict[str, dict[str, Any]] = {}
         params: dict[str, str | int] = {"limit": 1000} if kind == "anthropic" else {}
         try:

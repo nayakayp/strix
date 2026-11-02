@@ -65,6 +65,8 @@ if 'NATSUHAT_DASHBOARD_LLM' in os.environ:
         'output': snapshot['output_cost_per_mtok'],
         'cached_input': snapshot['cached_input_cost_per_mtok'],
         'has_api_key': bool(snapshot['api_key']),
+        'extra_header_names': list(snapshot.get('extra_headers') or {}),
+        'extra_body': snapshot.get('extra_body'),
     }), flush=True)
 if 'hold' in job['target']:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
@@ -180,6 +182,18 @@ def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # no
     cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
     endpoint = f"/api/jobs/{name}/resume"
     manager = httpd.job_manager
+    provider = manager.llm_profiles.update(
+        "providers",
+        {
+            "name": "Resume gateway",
+            "kind": "custom",
+            "base_url": "https://provider.test/v1",
+            "model": "team/resume",
+            "extra_headers": {"X-Resume": "resume-routing-value"},
+            "extra_body": {"reasoning": {"enabled": False}, "uncensored": True},
+        },
+    )["providers"][0]
+    manager.llm_profiles.update("select", {"id": provider["id"]})
     try:
         assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["can_resume"]
         assert request(url, endpoint, body={"authorized": True})[0] == 403
@@ -229,10 +243,15 @@ def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # no
         assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["can_resume"] is False
         assert request(url, "/api/jobs", cookie, {**REQUEST, "runner": runner})[0] == 409
         deadline = time.monotonic() + 3
-        while "Resumed checkpoint" not in (directory / "job.log").read_text():
+        while "LLM configuration: " not in (directory / "job.log").read_text():
             assert time.monotonic() < deadline
             time.sleep(0.02)
-        assert (directory / "job.log").read_text().startswith("ORIGINAL LOG\n")
+        log = (directory / "job.log").read_text()
+        assert log.startswith("ORIGINAL LOG\n") and "Resumed checkpoint" in log
+        connection = json.loads(log.split("LLM configuration: ", 1)[1].splitlines()[0])
+        assert connection["extra_header_names"] == ["X-Resume"]
+        assert connection["extra_body"] == {"reasoning": {"enabled": False}, "uncensored": True}
+        assert "resume-routing-value" not in log
         assert json.loads((directory / "run.json").read_text())["llm_usage"] == record["llm_usage"]
         assert (directory / "vulnerabilities.json").read_text() == findings
         with sqlite3.connect(state / "agents.db") as database:
@@ -975,6 +994,8 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
         "model": "team/model-a",
         "api_key": "synthetic-profile-key",
         "prices": {"team/model-a": {"input": 0.23, "output": 4.6, "cached_input": 0.017}},
+        "extra_headers": {"X-Netra-Admin-Target": "private-routing-value"},
+        "extra_body": {"reasoning": {"enabled": False}, "uncensored": True},
     }
     try:
         for path, body in (
@@ -1007,6 +1028,9 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
         assert "synthetic-profile-key" not in json.dumps(result)
         saved = result["providers"][0]
         assert saved["has_api_key"] is True and "api_key" not in saved
+        assert "extra_headers" not in saved and "private-routing-value" not in json.dumps(result)
+        assert saved["extra_header_names"] == ["X-Netra-Admin-Target"]
+        assert saved["extra_body"] == provider["extra_body"]
         identifier = saved["id"]
         file = dashboard_profiles_path(tmp_path)
         assert not file.is_relative_to(tmp_path)
@@ -1029,6 +1053,7 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
         assert "synthetic-profile-key" not in json.dumps(result)
         metadata = (tmp_path / "natsuhat_runs" / result["job"]["id"] / "job.json").read_text()
         assert "synthetic-profile-key" not in metadata
+        assert "private-routing-value" not in metadata
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             log = request(url, f"/api/jobs/{result['job']['id']}/log", cookie)[1]["text"]
@@ -1041,12 +1066,25 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
             "output": 4.6,
             "cached_input": 0.017,
             "has_api_key": True,
+            "extra_header_names": ["X-Netra-Admin-Target"],
+            "extra_body": provider["extra_body"],
         }
+        assert "private-routing-value" not in log
         # Blank replacements preserve credentials; unrelated model rates survive edits.
-        update = {**provider, "id": identifier, "api_key": "", "model": "team/model-b"}
+        update = {
+            **provider,
+            "id": identifier,
+            "api_key": "",
+            "model": "team/model-b",
+            "extra_headers": {"X-Netra-Admin-Target": None},
+        }
         assert request(url, "/api/llm/providers", cookie, update)[0] == 200
         persisted = json.loads(file.read_text())["providers"][0]
         assert persisted["api_key"] == "synthetic-profile-key"
+        assert persisted["extra_headers"] == provider["extra_headers"]
+        snapshot = httpd.job_manager.llm_profiles.selected()
+        assert snapshot["extra_body"] == provider["extra_body"]
+        assert snapshot["extra_headers"] == provider["extra_headers"]
         assert persisted["prices"]["team/model-a"]["output"] == 4.6
         assert (
             request(
@@ -1055,11 +1093,15 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
             == 400
         )
         assert (
-            request(url, "/api/llm/providers", cookie, {**update, "clear_api_key": True})[1][
-                "providers"
-            ][0]["has_api_key"]
+            request(
+                url,
+                "/api/llm/providers",
+                cookie,
+                {**update, "clear_api_key": True, "extra_headers": {}},
+            )[1]["providers"][0]["has_api_key"]
             is False
         )
+        update["extra_headers"] = {}
         # Keyless local providers can change endpoints without a nonexistent key to clear.
         code, result = request(
             url, "/api/llm/providers", cookie, {**update, "base_url": "https://other.test/v1"}
@@ -1067,6 +1109,9 @@ def test_llm_settings_http_persistence_credentials_and_job_selection(  # noqa: P
         assert code == 200
         assert result["providers"][0]["base_url"] == "https://other.test/v1"
         assert result["providers"][0]["has_api_key"] is False
+        assert httpd.job_manager.llm_profiles.selected()["extra_headers"] is None
+        # Already captured job settings do not change with later provider edits.
+        assert snapshot["extra_headers"] == provider["extra_headers"]
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -1092,6 +1137,8 @@ def test_provider_model_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     def catalog(req: httpx.Request) -> httpx.Response:
+        assert req.headers.get("X-Tenant") == "discovery-routing-value"
+        assert not req.content  # Inference-only body fields never enter discovery.
         if kind == "anthropic":
             if (
                 req.url.path != "/v1/models"
@@ -1141,6 +1188,8 @@ def test_provider_model_discovery(
             "base_url": "https://provider.example.test",
             "api_key": "synthetic-discovery-key",
             "model": "model-a",
+            "extra_headers": {"X-Tenant": "discovery-routing-value"},
+            "extra_body": {"uncensored": True},
         },
     )
     models = profiles.models(saved["providers"][0]["id"])
@@ -1153,6 +1202,92 @@ def test_provider_model_discovery(
         )
     else:
         assert all("prices" not in model for model in models)
+
+
+@pytest.mark.parametrize(
+    "overrides,field",
+    [
+        ({"extra_headers": {"Authorization": "private-override"}}, "Extra headers:"),
+        ({"extra_headers": {"hOsT": "private-override"}}, "Extra headers:"),
+        ({"extra_headers": {"Content-Length": "8"}}, "Extra headers:"),
+        ({"extra_headers": {"X-Bad\nName": "private-override"}}, "Extra headers:"),
+        ({"extra_headers": {"X-A": "private-override\r\nInjected: yes"}}, "Extra headers:"),
+        ({"extra_headers": {"X-A": "a", "x-a": "b"}}, "Extra headers:"),
+        ({"extra_headers": {"X-A": None}}, "Extra headers:"),
+        ({"extra_headers": {"X-A": 12}}, "Extra headers:"),
+        ({"extra_headers": []}, "Extra headers:"),
+        ({"extra_body": []}, "Extra body:"),
+        ({"extra_body": None}, "Extra body:"),
+        ({"extra_body": {"uncensored": float("nan")}}, "Extra body:"),
+        *[
+            ({"extra_body": {key: "private-override"}}, "Extra body:")
+            for key in (
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "instructions",
+                "tool_choice",
+            )
+        ],
+    ],
+)
+def test_provider_rejects_unsafe_overrides_without_disclosing_values(
+    tmp_path: Path,
+    overrides: dict[str, Any],
+    field: str,
+) -> None:
+    profiles = LlmProfiles(tmp_path / "providers.json")
+    with pytest.raises(jobs.JobError, match=field) as error:
+        profiles.update(
+            "providers",
+            {
+                "name": "Invalid",
+                "kind": "custom",
+                "base_url": "https://provider.test/v1",
+                "model": "team/model",
+                **overrides,
+            },
+        )
+    assert "private-override" not in str(error.value)
+    assert profiles.public() == {"providers": [], "selected_id": None}
+
+
+def test_provider_header_edits_and_legacy_defaults(tmp_path: Path) -> None:
+    profiles = LlmProfiles(tmp_path / "providers.json")
+    payload = {
+        "name": "Gateway",
+        "kind": "custom",
+        "base_url": "https://provider.test/v1",
+        "model": "team/model",
+    }
+    saved = profiles.update("providers", payload)["providers"][0]
+    identifier = saved["id"]
+    profiles.update("select", {"id": identifier})
+    assert profiles.selected()["extra_headers"] is None
+    assert profiles.selected()["extra_body"] is None
+    payload.update(
+        id=identifier,
+        extra_headers={"X-A": "secret-a", "X-B": "secret-b"},
+        extra_body={"uncensored": False, "nested": {"n": 0, "list": [None, True]}},
+    )
+    profiles.update("providers", payload)
+    original = profiles.selected()
+    # Older clients omit these fields. They must not silently erase saved overrides.
+    edit = {k: v for k, v in payload.items() if k not in {"extra_headers", "extra_body"}}
+    profiles.update("providers", edit)
+    assert profiles.selected() == original
+    for changed in ({"base_url": "https://other.test/v1"}, {"kind": "openai"}):
+        with pytest.raises(jobs.JobError, match="Re-enter or remove saved extra header"):
+            profiles.update("providers", {**edit, **changed})
+    profiles.update("providers", {**edit, "extra_headers": {"x-a": None, "X-B": "replacement"}})
+    assert profiles.selected()["extra_headers"] == {"x-a": "secret-a", "X-B": "replacement"}
+    profiles.update("providers", {**edit, "extra_headers": {"x-a": None}})
+    assert profiles.selected()["extra_headers"] == {"x-a": "secret-a"}
+    profiles.update("providers", {**edit, "extra_headers": {}, "extra_body": {}})
+    restored = LlmProfiles(profiles.path).selected()
+    assert restored["extra_headers"] is None and restored["extra_body"] is None
+    assert original["extra_headers"] == {"X-A": "secret-a", "X-B": "secret-b"}
 
 
 @pytest.mark.parametrize("status", [200, 302, 401])

@@ -12,6 +12,8 @@ from contextvars import ContextVar
 from pathlib import Path  # noqa: TC003  used at runtime by ``setup_scan_logging``
 from typing import TYPE_CHECKING
 
+from natsuhat.telemetry.redaction import redact_text
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,6 +47,13 @@ class _NatsuhatContextFilter(logging.Filter):
 
 _FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-7s %(scan_id)s %(agent_id)s %(name)s: %(message)s"
 _DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+
+class _RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        # Includes formatted arguments and exception tracebacks, without mutating
+        # the record that other handlers may also format.
+        return redact_text(super().format(record))
 
 
 # Third-party loggers that get noisy at DEBUG. Capped so the file isn't
@@ -137,7 +146,7 @@ def _debug_enabled(debug: bool | None) -> bool:
 
 def _stream_handler(debug: bool) -> logging.Handler:
     handler = _CurrentStderrHandler(logging.DEBUG if debug else logging.ERROR)
-    handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
+    handler.setFormatter(_RedactingFormatter(_FORMAT, datefmt=_DATEFMT))
     handler.addFilter(_NatsuhatContextFilter())
     handler.addFilter(_StdoutQuietFilter())
     setattr(handler, _STREAM_TAG, True)
@@ -183,7 +192,7 @@ def setup_scan_logging(run_dir: Path, *, debug: bool | None = None) -> Callable[
 
     file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
+    file_handler.setFormatter(_RedactingFormatter(_FORMAT, datefmt=_DATEFMT))
     file_handler.addFilter(_NatsuhatContextFilter())
     setattr(file_handler, _HANDLER_TAG, True)
 
