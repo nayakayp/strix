@@ -106,7 +106,7 @@ export default function LlmSettingsView() {
 
   return <div className="space-y-6">
     <div>
-      <h1 className="flex items-center gap-2 text-2xl font-semibold"><Settings2 className="h-5 w-5 text-[#888]" aria-hidden="true" />LLM settings</h1>
+      <h2 className="flex items-center gap-2 text-2xl font-semibold"><Settings2 className="h-5 w-5 text-[#888]" aria-hidden="true" />LLM providers</h2>
       <p className="mt-1 text-sm text-[#888]">Provider connections, models, and estimated token prices for dashboard scans.</p>
     </div>
     <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm">
@@ -146,7 +146,7 @@ export default function LlmSettingsView() {
           <span className="mt-1 block text-xs text-[#888]">Write-only. Stored per workspace under ~/.natsuhat/dashboard with owner-only permissions, not encrypted. Excluded from scan sources. Never returned to the browser.</span>
         </label>
         {saved?.has_api_key && <label className="flex items-center gap-2 text-xs text-[#aaa]"><input type="checkbox" checked={clearKey} onChange={e => setClearKey(e.target.checked)} className="accent-emerald-500" />Remove saved API key on save</label>}
-        <details open={advancedOpen} onToggle={e => setAdvancedOpen(e.currentTarget.open)} className="border-t border-[#222] pt-4">
+        <details id="settings-requests" open={advancedOpen} onToggle={e => setAdvancedOpen(e.currentTarget.open)} className="border-t border-[#222] pt-4">
           <summary className="cursor-pointer text-sm font-semibold">Advanced request settings <span className="ml-1 text-xs font-normal text-[#888]">Optional headers and JSON body</span></summary>
           <div className="mt-4 space-y-5">
             <div className="space-y-3" aria-describedby={headerError ? "headers-error" : undefined}>
@@ -170,7 +170,7 @@ export default function LlmSettingsView() {
             </label>
           </div>
         </details>
-        <div className="border-t border-[#222] pt-4 space-y-4">
+        <div id="settings-models" className="border-t border-[#222] pt-4 space-y-4">
           <div className="flex flex-wrap items-center gap-3">
             <h3 className="mr-auto text-sm font-semibold">Model selection</h3>
             <button type="button" className={button} onClick={e => { if (!e.currentTarget.form?.reportValidity()) return; void perform(async () => { const provider = await save(); const list = await fetchProviderModels(provider.id); setModels(list); setNotice(`${list.length} models fetched. Choose a model or enter its ID manually.`); }); }}><RefreshCw className={`h-3.5 w-3.5 ${pending ? "animate-spin" : ""}`} aria-hidden="true" />{pending ? "Working…" : "Save & fetch models"}</button>

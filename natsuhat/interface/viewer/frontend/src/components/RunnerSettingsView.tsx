@@ -54,7 +54,7 @@ export default function RunnerSettingsView() {
 
   return <div className="max-w-4xl space-y-6">
     <div>
-      <h1 className="flex items-center gap-2 text-2xl font-semibold"><Box className="h-5 w-5 text-[#888]" aria-hidden="true" />Sandbox runners</h1>
+      <h2 className="flex items-center gap-2 text-2xl font-semibold"><Box className="h-5 w-5 text-[#888]" aria-hidden="true" />Sandbox runners</h2>
       <p className="mt-1 text-sm text-[#888]">Choose where new scans run and which prepared template they use.</p>
     </div>
     <div className="rounded-xl border border-[#222] bg-white/[0.02] p-4 text-xs leading-relaxed text-[#aaa]">
@@ -80,7 +80,7 @@ export default function RunnerSettingsView() {
         </section>
         {settings.images.map(image => {
           const field = image.id === "e2b" ? "e2b_template" : "daytona_snapshot";
-          return <section key={image.id} aria-label={`${image.name} runner`} className="space-y-4 rounded-xl border border-[#222] bg-white/[0.02] p-5">
+          return <section key={image.id} id={`settings-${image.id}`} aria-label={`${image.name} runner`} className="space-y-4 rounded-xl border border-[#222] bg-white/[0.02] p-5">
             <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold">{image.name}</h2><span className={`text-xs ${image.configured ? "text-emerald-400" : "text-amber-400"}`}>{image.configured ? "API key configured" : "API key not configured"}</span></div>
             <label className="block text-sm text-[#aaa]">{image.id === "e2b" ? "E2B template name, tag, or ID" : "Daytona snapshot name or ID"}
               <input className={input} maxLength={256} value={draft[field]} placeholder="Automatic — use required version" onChange={e => setDraft({ ...draft, [field]: e.target.value })} />

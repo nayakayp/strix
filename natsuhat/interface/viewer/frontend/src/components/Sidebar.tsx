@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Box, Github, Settings2 } from "lucide-react";
+import { Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { McpConnectionStatus } from "@/data/serverSource";
 import type { View } from "@/App";
@@ -147,31 +147,15 @@ export default function Sidebar({
             <NavItem
               icon={<ProjectsIcon />}
               label="Pentest"
-              active={view !== "settings" && view !== "integrations" && view !== "runners"}
+              active={view !== "settings"}
               onClick={() => onSelectView("pentest")}
             />
             {canManageScans && (
               <NavItem
                 icon={<Settings2 className="h-4 w-4" />}
-                label="LLM settings"
+                label="Settings"
                 active={view === "settings"}
                 onClick={() => onSelectView("settings")}
-              />
-            )}
-            {canManageScans && (
-              <NavItem
-                icon={<Box className="h-4 w-4" />}
-                label="Sandbox runners"
-                active={view === "runners"}
-                onClick={() => onSelectView("runners")}
-              />
-            )}
-            {canManageScans && (
-              <NavItem
-                icon={<Github className="h-4 w-4" />}
-                label="Integrations"
-                active={view === "integrations"}
-                onClick={() => onSelectView("integrations")}
               />
             )}
             {mcpConnections.length > 0 && (
