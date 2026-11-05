@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from pydantic import ValidationError
 from natsuhat.config import loader
 from natsuhat.config.settings import LlmSettings
 from natsuhat.report.pricing import resolve_litellm_model
+from natsuhat.report.state import litellm_cost_callback
 from natsuhat.report.usage import LLMUsageLedger
 
 
@@ -45,21 +47,71 @@ def _usage(input_tokens: int, output_tokens: int = 0, cached_tokens: int = 0) ->
     return usage
 
 
-def test_resolves_common_bare_model_names() -> None:
+def test_resolves_common_bare_model_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exercise aliases without depending on a changing upstream price catalogue.
+    monkeypatch.setattr(
+        litellm,
+        "model_cost",
+        {
+            "deepseek/deepseek-v4-flash": {
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 2e-6,
+            },
+            "xai/grok-4.5": {
+                "input_cost_per_token": 2e-6,
+                "output_cost_per_token": 3e-6,
+            },
+            "openrouter/x-ai/grok-4.5": {
+                "input_cost_per_token": 2e-6,
+                "output_cost_per_token": 3e-6,
+            },
+            "minimax/MiniMax-M3": {
+                "input_cost_per_token": 3e-6,
+                "output_cost_per_token": 4e-6,
+            },
+        },
+    )
     resolve_litellm_model.cache_clear()
     assert resolve_litellm_model("deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
     assert resolve_litellm_model("openai/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
-    # LiteLLM prices grok-4.5 identically under xai/, perplexity/xai/ and
-    # openrouter/x-ai/, so the resolver may return any of them; the contract
-    # is a provider-qualified name LiteLLM can price.
+    # Identically priced aliases may resolve to either provider-qualified name.
     grok = resolve_litellm_model("grok-4.5")
     assert grok is not None
     assert grok.endswith("/grok-4.5")
     assert grok in litellm.model_cost
-    # MiniMax-M3 is sold by several LiteLLM providers at different prices, so
-    # the resolver must not guess from its bare name. A provider-qualified
-    # model remains deterministic.
     assert resolve_litellm_model("minimax/MiniMax-M3") == "minimax/MiniMax-M3"
+    resolve_litellm_model.cache_clear()
+
+
+@pytest.mark.parametrize("source", ["sdk", "callback"])
+def test_cost_estimation_does_not_resolve_credentials(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    model = "github_copilot/natsuhat-pricing-test"
+    monkeypatch.setitem(
+        litellm.model_cost,
+        model,
+        {
+            "litellm_provider": "github_copilot",
+            "mode": "chat",
+            "input_cost_per_token": 1e-6,
+            "output_cost_per_token": 4e-6,
+        },
+    )
+    ledger = LLMUsageLedger()
+    with patch("litellm.get_llm_provider", side_effect=RuntimeError("would authenticate")):
+        if source == "sdk":
+            ledger.record(agent_id="a", usage=_usage(10, 3), model=model)
+        else:
+            with patch(
+                "natsuhat.report.state.get_global_report_state",
+                return_value=SimpleNamespace(record_observed_llm_cost=ledger.record_observed_cost),
+            ):
+                litellm_cost_callback(
+                    {"model": model},
+                    {"usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}},
+                )
+    assert ledger.total_cost == pytest.approx(0.000022)
 
 
 def test_resolver_returns_none_for_unresolvable_model() -> None:

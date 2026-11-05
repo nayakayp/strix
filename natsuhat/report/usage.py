@@ -317,6 +317,8 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
             cost = completion_cost(
                 completion_response={"model": resolved, "usage": usage_payload},
                 model=resolved,
+                # Provider inference can authenticate; this is only a local price lookup.
+                custom_llm_provider=resolved.split("/", 1)[0],
             )
         except Exception:  # nosec B112  # noqa: BLE001, S112
             continue
