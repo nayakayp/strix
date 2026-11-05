@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a main deployment halfway through promotion/webhook delivery.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  python:
+    uses: ./.github/workflows/ci-python.yml
+
+  tui:
+    uses: ./.github/workflows/ci-tui.yml
+
+  viewer:
+    uses: ./.github/workflows/ci-viewer.yml
+
+  package:
+    uses: ./.github/workflows/ci-package.yml
+
+  workflows:
+    uses: ./.github/workflows/ci-workflows.yml
+
+  ci-passed:
+    name: ci-passed
+    if: always()
+    needs:
+      - python
+      - tui
+      - viewer
+      - package
+      - workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          failing=$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"' <<< "$NEEDS")
+          if [ -n "$failing" ]; then
+            echo "$failing"
+            exit 1
+          fi
+
+  deploy-vps:
+    name: Deploy VPS
+    needs: ci-passed
+    if: >-
+      vars.VPS_AUTO_DEPLOY == 'true' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    permissions:
+      contents: write
+    concurrency:
+      group: vps-production
+      cancel-in-progress: false
+    steps:
+      # No source checkout with this write token. Komodo watches production,
+      # never the potentially untested tip of main.
+      - name: Promote the tested commit and wait for deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TESTED_SHA: ${{ github.sha }}
+          KOMODO_ADDRESS: ${{ secrets.KOMODO_ADDRESS }}
+          KOMODO_API_KEY: ${{ secrets.KOMODO_API_KEY }}
+          KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
+          KOMODO_STACK: ${{ vars.KOMODO_STACK }}
+        run: |
+          set -euo pipefail
+          test -n "$KOMODO_API_KEY"
+          test -n "$KOMODO_API_SECRET"
+          test -n "$KOMODO_STACK"
+          [[ "$KOMODO_ADDRESS" == https://* ]]
+          deadline=$((SECONDS + 2400))
+          komodo() {
+            # Never retry an execution request: a timeout may mean it was accepted.
+            curl --fail --silent --show-error \
+              --connect-timeout 10 --max-time 30 \
+              --request POST --header "Content-Type: application/json" \
+              --header "X-Api-Key: $KOMODO_API_KEY" \
+              --header "X-Api-Secret: $KOMODO_API_SECRET" \
+              --data "$2" "${KOMODO_ADDRESS%/}/$1"
+          }
+          wait_for_poll() {
+            if (( SECONDS >= deadline )); then
+              echo 'Timed out waiting for Komodo. Inspect the Stack before retrying; remote work may still be running.' >&2
+              exit 1
+            fi
+            sleep 5
+          }
+          stack=$(jq -nc --arg stack "$KOMODO_STACK" '{stack: $stack}')
+          while true; do
+            state=$(komodo read/GetStackActionState "$stack")
+            jq -e 'length > 0 and all(.[]; type == "boolean")' <<< "$state" > /dev/null
+            if jq -e 'all(.[]; . == false)' <<< "$state" > /dev/null; then
+              break
+            fi
+            wait_for_poll
+          done
+          # Refuse configuration drift before promoting a release or executing it.
+          definition=$(komodo read/GetStack "$stack")
+          jq -e '
+            .config.webhook_enabled == false and .config.auto_update == false and
+            .config.files_on_host == false and .config.file_contents == "" and
+            .config.run_build == true and
+            (.config.extra_args | index("--wait") != null) and
+            .info.missing_files == []
+          ' <<< "$definition" > /dev/null || {
+            echo 'Unsafe Stack configuration: disable webhooks/auto-update, use Git source, resolve missing files, and enable build/health waiting.' >&2
+            exit 1
+          }
+          source=$(jq -c '.config' <<< "$definition")
+          linked_repo=$(jq -r '.linked_repo' <<< "$source")
+          if [ -n "$linked_repo" ]; then
+            source=$(komodo read/GetRepo "$(jq -nc --arg repo "$linked_repo" '{repo: $repo}')")
+            source=$(jq -c '.config' <<< "$source")
+          fi
+          jq -e --arg repo "$GH_REPO" '
+            .git_provider == "github.com" and .git_https == true and
+            .repo == $repo and .branch == "production" and .commit == "" and
+            .webhook_enabled == false
+          ' <<< "$source" > /dev/null || {
+            echo 'Komodo must source this GitHub repository over HTTPS from production, without a pinned commit or direct webhooks.' >&2
+            exit 1
+          }
+          # Wait before moving the release branch, so an older deployment can
+          # finish checking out/building its own release without this job racing it.
+          latest=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          if [ "$latest" != "$TESTED_SHA" ]; then
+            echo 'Skipping superseded commit; main has moved.'
+            exit 0
+          fi
+          gh api --method PATCH "repos/$GH_REPO/git/refs/heads/production" \
+            -f sha="$TESTED_SHA" -F force=false --silent
+          update=$(komodo execute/DeployStack "$stack")
+          update_id=$(jq -er '._id."$oid" | select(type == "string" and length > 0)' <<< "$update")
+          echo "Tracking Komodo Update $update_id"
+          while true; do
+            case $(jq -er '.status' <<< "$update") in
+              Complete)
+                if ! jq -e '.success == true' <<< "$update" > /dev/null; then
+                  echo "Komodo deployment failed. Inspect Update $update_id." >&2
+                  exit 1
+                fi
+                break
+                ;;
+              Queued|InProgress) wait_for_poll ;;
+              *) echo 'Unexpected Komodo Update status.' >&2; exit 1 ;;
+            esac
+            update=$(komodo read/GetUpdate "$(jq -nc --arg id "$update_id" '{id: $id}')")
+          done
+          echo "Komodo deployment completed for tested commit $TESTED_SHA (Update $update_id)." >> "$GITHUB_STEP_SUMMARY"
