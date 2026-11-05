@@ -53,7 +53,13 @@ exit does not guarantee complete coverage: check the run status, scope, and budg
 ## Dashboard codebase scans
 
 Start `uv run --frozen natsuhat view --manage-scans` and use **Pentest → New scan**.
-Choose a target URL/server path, a connected GitHub repository, or a ZIP codebase.
+Dashboard scans use **E2B only**. Set `E2B_API_KEY` on the server and check
+availability in **Settings → Sandbox → E2B**. The only template source is
+`nayakas-project/natsuhat-runner:stable`; environment and saved template overrides
+are ignored. Each new scan pins the published release, independent of local
+dashboard changes, and verifies its manifest before sending LLM credentials.
+Docker is preinstalled inside E2B, not required on the dashboard server.
+Choose a target URL, domain, IP, a connected GitHub repository, or a ZIP codebase.
 Every scan still requires authorization and an LLM budget. Uploading or connecting
 a repository never starts a scan.
 
@@ -91,14 +97,14 @@ Sources are stored per workspace under `~/.natsuhat/dashboard/`, outside results
 and scan mounts. Each scan gets an immutable snapshot and a disposable writable
 copy; failed-scan reruns use the same snapshot. Unused uploads expire after 24
 hours and are removed on the next upload or server start. Deleting a scan removes
-its local source snapshot. E2B/Daytona scans explicitly transfer code to the
+its local source snapshot. E2B scans explicitly transfer code to the
 provider's retained sandbox; deleting local results does not delete that sandbox.
 GitHub credentials never go to runners. Code excerpts can reach the configured LLM.
 
 Stopped or interrupted dashboard scans with saved agent checkpoints show
 **Resume scan**. Confirm authorization and the total LLM budget, including prior
 spending, to continue the same run and conversation history. Remote resumes use
-the retained E2B/Daytona sandbox, not a new VM; provider charges resume. Source
+the retained E2B sandbox, not a new VM; provider charges resume. Source
 scans use the original snapshot. Completed scans and scans without checkpoints
 cannot be resumed. Resuming does not restore terminated commands or network sessions.
 

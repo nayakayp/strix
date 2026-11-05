@@ -8,7 +8,6 @@ import os
 import shutil
 import signal
 import subprocess
-import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
@@ -31,8 +30,6 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     os.environ["NATSUHAT_TELEMETRY"] = "false"
     if args.manage_scans:
-        if os.environ.get("AMP_ORB") == "1":
-            _ensure_orb_docker()
         _serve(latest_run_dir() or runs_base_dir() / ".dashboard", manage_scans=True)
         return
 
@@ -119,45 +116,6 @@ def main() -> None:
             os.utime(previous / "run.json", (modified, modified))
 
         _serve(run_dir)
-
-
-def _docker_ready(docker: str) -> bool:
-    try:
-        return (
-            subprocess.run(  # noqa: S603 - resolved executable and fixed arguments
-                [docker, "info"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=3,
-                check=False,
-            ).returncode
-            == 0
-        )
-    except subprocess.TimeoutExpired:
-        return False
-
-
-def _ensure_orb_docker() -> None:
-    docker, amp = shutil.which("docker"), shutil.which("amp")
-    if docker is None or amp is None:
-        raise SystemExit(
-            "Docker and Amp must be in PATH. Rerun .agents/setup if Docker is missing."
-        )
-    if _docker_ready(docker):
-        return
-    Console().print("Starting the supervised Docker service; waiting for its API…")
-    subprocess.run(  # noqa: S603 - resolved Amp executable, fixed service name
-        [amp, "orb", "service", "restart", "docker"], check=True, timeout=15
-    )
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if _docker_ready(docker):
-            return
-        time.sleep(0.5)
-    raise SystemExit(
-        "Docker did not become ready. Check `amp orb service logs docker` and DOCKER_HOST. "
-        "This orb provider must support running Docker containers."
-    )
 
 
 def _serve(run_dir: Path, *, manage_scans: bool = False) -> None:

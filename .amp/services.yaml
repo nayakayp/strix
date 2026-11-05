@@ -5,7 +5,7 @@ services:
     portal:
       url: /
       title: Natsuhat local dashboard
-      description: Local history, scan management, and LLM settings. Starting scans requires Docker and can incur LLM charges.
+      description: Local history, E2B scan management, and LLM settings. Starting scans requires E2B configuration and can incur E2B and LLM charges.
   docker:
     platforms: [linux]
     command: 'sudo dockerd --host=unix:///var/run/docker.sock --group="$(id -gn)"'

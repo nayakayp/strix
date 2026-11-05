@@ -10,10 +10,8 @@ const groups = [
     { id: "models", label: "Models and pricing", keywords: "model tokens cost input output cached" },
     { id: "requests", label: "Request options", keywords: "advanced headers extra body json reasoning" },
   ] },
-  { id: "runners", label: "Sandbox runners", icon: Box, entries: [
-    { id: "defaults", label: "Defaults", keywords: "default runner local docker automatic" },
-    { id: "e2b", label: "E2B", keywords: "template stable availability version release" },
-    { id: "daytona", label: "Daytona", keywords: "template snapshot availability version release" },
+  { id: "runners", label: "Sandbox", icon: Box, entries: [
+    { id: "e2b", label: "E2B", keywords: "sandbox runner template stable availability version release" },
   ] },
   { id: "integrations", label: "Integrations", icon: Plug, entries: [
     { id: "github", label: "GitHub", keywords: "app installation authorization connect" },
@@ -24,8 +22,9 @@ const groups = [
 function readSection() {
   const params = new URLSearchParams(window.location.hash.slice(1));
   const section = params.get("section");
+  if (section === "defaults" || section === "daytona") return "e2b";
   if (groups.some(group => group.entries.some(entry => entry.id === section))) return section!;
-  return params.get("page") === "runners" ? "defaults" : params.get("page") === "integrations" ? "github" : "connections";
+  return params.get("page") === "runners" ? "e2b" : params.get("page") === "integrations" ? "github" : "connections";
 }
 
 export default function SettingsView() {

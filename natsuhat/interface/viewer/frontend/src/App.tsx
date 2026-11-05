@@ -1,15 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, AlertCircle, Bot } from "lucide-react";
+import { ArrowLeft, AlertCircle, ChevronRight, FileText, Bot } from "lucide-react";
 import type { Vulnerability, VulnerabilitySeverity } from "@/types/issues";
 import { SEVERITY_COLORS } from "@/types/issues";
 import { getSeverityDot } from "@/lib/vulnerability-utils";
-import VulnerabilityDetail from "@/components/vulnerability/VulnerabilityDetail";
+import FindingPanel from "@/components/vulnerability/FindingPanel";
 import { ContentSection } from "@/components/vulnerability/ContentSection";
-import { IssueSeveritySummary } from "@/components/IssueSeveritySummary";
-import AgentGraph from "@/components/live/AgentGraph";
-import { buildGraphAgents } from "@/components/live/AgentTranscript";
-import AgentDetailModal from "@/components/live/AgentDetailModal";
-import { ScanPromptComposer } from "@/components/live/ScanPromptComposer";
+import AgentBrowser from "@/components/live/AgentBrowser";
 import { severityCounts, type ParsedRunSummary } from "@/lib/local-run-parser";
 import {
   fetchAll,
@@ -31,16 +27,17 @@ import SettingsView from "@/components/SettingsView";
 import { RunDetails } from "@/components/RunDetails";
 import { TrustToast } from "@/components/TrustToast";
 
-export type View = "pentest" | "overview" | "issues" | "agents" | "settings";
+export type View = "pentest" | "overview" | "agents" | "settings";
 
-function readPage(): { view: View; run: string | null } {
+function readPage(): { view: View; run: string | null; creating: boolean } {
   const params = new URLSearchParams(window.location.hash.slice(1));
   const page = params.get("page");
   const run = params.get("run");
   const tab = params.get("tab");
   return {
-    view: page === "runners" || page === "integrations" || page === "settings" ? "settings" : run ? (tab === "issues" || tab === "agents" ? tab : "overview") : "pentest",
+    view: page === "runners" || page === "integrations" || page === "settings" ? "settings" : run ? (tab === "agents" ? tab : "overview") : "pentest",
     run,
+    creating: page === "pentest" && !run && params.get("action") === "new",
   };
 }
 
@@ -55,7 +52,10 @@ export default function App() {
   const [run, setRun] = useState<LoadedRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const closeFinding = useCallback(() => setSelectedId(null), []);
   const [view, setView] = useState<View>(() => readPage().view);
+  const [creating, setCreating] = useState(() => readPage().creating);
   const [runs, setRuns] = useState<RunsPayload | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -192,6 +192,7 @@ export default function App() {
     const onNavigate = () => {
       const page = readPage();
       setView(page.view);
+      setCreating(page.creating);
       if (activeRun !== page.run) {
         setRun(null);
         setError(null);
@@ -232,7 +233,7 @@ export default function App() {
     }
   }
 
-  const isRunView = view === "overview" || view === "issues" || view === "agents";
+  const isRunView = view === "overview" || view === "agents";
 
   return (
     <div className="min-h-screen bg-black text-white flex">
@@ -247,7 +248,7 @@ export default function App() {
         mcpInUse={mcpInUse}
       />
 
-      <div className="flex-1 min-w-0">
+      <div ref={contentRef} className="flex-1 min-w-0">
         {/* Top bar */}
         <div className="border-b border-[#222]">
           <div className="max-w-[88rem] mx-auto px-3 sm:px-6 py-4 flex flex-wrap items-center gap-1.5 gap-y-3">
@@ -255,8 +256,7 @@ export default function App() {
               <img src="./logo.png" alt="Natsuhat" className="w-10 h-8 object-cover" />
               <div className="text-base text-white font-medium tracking-tight">Natsuhat</div>
             </div>
-            <span className="hidden text-sm text-[#888] lg:inline">{view === "settings" ? "Settings" : "Pentest"}{isRunView ? " / Scan details" : ""}</span>
-            {isRunView && run?.summary.runId && <LiveIndicator finished={run.finished} />}
+            <span className="hidden text-sm text-[#888] lg:inline">{view === "settings" ? "Settings" : "Pentest"}{isRunView ? " / Scan details" : creating ? " / New scan" : ""}</span>
             <nav aria-label="Main navigation" className="ml-auto flex flex-wrap items-center gap-4 lg:hidden">
               <TabButton active={view === "pentest" || isRunView} onClick={() => userSetView("pentest")}>Pentest</TabButton>
               {canManageScans && <TabButton active={view === "settings"} onClick={() => userSetView("settings")}>Settings</TabButton>}
@@ -272,10 +272,9 @@ export default function App() {
             </div>
           )}
 
-          {/* Keyed wrapper: re-mounts on every view / finding / run change so the
-              page-in transition replays. */}
+          {/* Finding selection must not remount the overview or reset its scroll. */}
           <div
-            key={`${activeRun ?? "launched"}:${view}:${selectedId ?? ""}`}
+            key={`${activeRun ?? "launched"}:${view}`}
             className="animate-page-in space-y-6"
           >
           {view === "settings" ? (
@@ -284,7 +283,7 @@ export default function App() {
             <div className="space-y-4">
               {deleteError && <p role="alert" className="text-sm text-red-400">{deleteError}</p>}
               {canManageScans ? (
-                <ScanJobsView onSelectRun={selectRun} onDeleteRun={removeRun} deleting={deleting} />
+                <ScanJobsView creating={creating} onCreatingChange={value => { window.location.hash = value ? "page=pentest&action=new" : "page=pentest"; }} onSelectRun={selectRun} onDeleteRun={removeRun} deleting={deleting} />
               ) : (
                 <>
                   <h1 className="text-2xl font-semibold">Pentest</h1>
@@ -303,14 +302,11 @@ export default function App() {
               <button onClick={() => userSetView("pentest")} className="cursor-pointer inline-flex items-center gap-1.5 text-sm text-[#888] hover:text-white transition-colors">
                 <ArrowLeft className="h-4 w-4" aria-hidden="true" />All scans
               </button>
-              <SummaryHeader summary={run.summary} />
+              <SummaryHeader summary={run.summary} raw={run.raw} finished={run.finished} />
 
               <div className="flex gap-5 border-b border-[#2a2a2a]" role="navigation" aria-label="Scan details">
                 <TabButton active={view === "overview"} onClick={() => userSetView("overview")}>
                   Overview
-                </TabButton>
-                <TabButton active={view === "issues"} onClick={() => userSetView("issues")}>
-                  Issues{run.vulnerabilities.length > 0 ? ` (${run.vulnerabilities.length})` : ""}
                 </TabButton>
                 {(!run.finished || agentCount > 0) && (
                   <TabButton active={view === "agents"} onClick={() => userSetView("agents")}>
@@ -323,56 +319,31 @@ export default function App() {
                 <OverviewTab
                   summary={run.summary}
                   counts={counts}
-                  total={run.vulnerabilities.length}
+                  vulnerabilities={run.vulnerabilities}
+                  finished={run.finished}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  agentCount={agentCount}
                   reportMarkdown={run.reportMarkdown}
                   raw={run.raw}
                 />
               ) : view === "agents" ? (
-                <AgentsTab run={run} canSteer={canSteer} />
-              ) : selected ? (
-                <div className="space-y-4">
-                  <button
-                    onClick={() => setSelectedId(null)}
-                    className="cursor-pointer inline-flex items-center gap-1.5 text-sm text-[#888] hover:text-white transition-colors"
-                  >
-                    <ArrowLeft className="w-4 h-4" /> Back to all findings
-                  </button>
-                  <VulnerabilityDetail vulnerability={selected} />
-                </div>
-              ) : (
-                <FindingsList
-                  vulnerabilities={run.vulnerabilities}
-                  finished={run.finished}
-                  onSelect={(id) => setSelectedId(id)}
-                />
-              )}
+                <AgentBrowser run={run} canSteer={canSteer} />
+              ) : null}
             </>
           ) : null}
           </div>
         </div>
+        {view === "overview" && selected && run && <FindingPanel
+          vulnerability={selected}
+          vulnerabilities={run.vulnerabilities}
+          containerRef={contentRef}
+          onSelect={setSelectedId}
+          onClose={closeFinding}
+        />}
       </div>
       <TrustToast message={TRUST_BANNER} />
     </div>
-  );
-}
-
-function LiveIndicator({ finished }: { finished: boolean }) {
-  if (finished) {
-    return (
-      <span className="ml-3 inline-flex items-center gap-1.5 text-xs text-[#888]">
-        <span className="w-1.5 h-1.5 rounded-full bg-[#555]" />
-        Complete
-      </span>
-    );
-  }
-  return (
-    <span className="ml-3 inline-flex items-center gap-1.5 text-xs text-emerald-400">
-      <span className="relative flex h-1.5 w-1.5">
-        <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 animate-ping" />
-        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
-      </span>
-      Live
-    </span>
   );
 }
 
@@ -385,21 +356,29 @@ function formatDuration(seconds: number | null): string | null {
   return `${h}h ${m % 60}m`;
 }
 
-function SummaryHeader({ summary }: { summary: ParsedRunSummary }) {
+function SummaryHeader({ summary, raw, finished }: { summary: ParsedRunSummary; raw: Record<string, unknown>; finished: boolean }) {
   const duration = formatDuration(summary.durationSeconds);
+  const cost = (raw.llm_usage as { cost?: number } | undefined)?.cost;
+  const status = summary.status ?? (finished ? "Finished" : "Running");
+  const failed = status === "failed" || status === "crashed";
   return (
-    <div>
-      <h1 className="text-2xl font-semibold text-white">
-        {runTitle(summary.targets[0] ?? null, summary.runName ?? summary.runId ?? "Pentest results")}
-      </h1>
-      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[#888]">
-        {summary.targets.length > 0 && (
-          <span className="font-mono text-[#aaa]">{summary.targets.join(", ")}</span>
-        )}
-        {summary.scanMode && <Meta label={summary.scanMode} />}
-        {duration && <Meta label={duration} />}
-        {summary.status && <Meta label={summary.status} />}
+    <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="min-w-0">
+        <h1 className="text-2xl font-semibold text-white">
+          {runTitle(summary.targets[0] ?? null, summary.runName ?? summary.runId ?? "Pentest results")}
+        </h1>
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[#888]">
+          {summary.targets.length > 0 && (
+            <span className="break-all font-mono text-[#aaa]">{summary.targets.join(", ")}</span>
+          )}
+          {summary.scanMode && <Meta label={summary.scanMode} />}
+          {duration && <Meta label={duration} />}
+          {typeof cost === "number" && Number.isFinite(cost) && <Meta label={`$${cost.toFixed(2)} LLM`} />}
+        </div>
       </div>
+      <span className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium capitalize ${failed ? "border-red-500/30 bg-red-500/5 text-red-300" : finished ? "border-[#333] text-[#aaa]" : "border-emerald-500/30 bg-emerald-500/5 text-emerald-300"}`}>
+        <span className={`h-1.5 w-1.5 rounded-full ${failed ? "bg-red-400" : finished ? "bg-[#888]" : "animate-pulse bg-emerald-400"}`} aria-hidden="true" />{status.replaceAll("_", " ")}
+      </span>
     </div>
   );
 }
@@ -416,10 +395,12 @@ function Meta({ label }: { label: string }) {
 function FindingsList({
   vulnerabilities,
   finished,
+  selectedId,
   onSelect,
 }: {
   vulnerabilities: Vulnerability[];
   finished: boolean;
+  selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
   const sorted = [...vulnerabilities].sort(
@@ -439,8 +420,10 @@ function FindingsList({
       {sorted.map((v) => (
         <button
           key={v.id}
+          aria-expanded={selectedId === v.id}
+          aria-controls={selectedId === v.id ? "finding-panel" : undefined}
           onClick={() => onSelect(v.id)}
-          className="animate-card-in cursor-pointer w-full text-left rounded-lg border border-[#222] hover:border-[#444] bg-[rgba(255,255,255,0.02)] px-4 py-3 transition-colors flex items-center gap-3"
+          className={`cursor-pointer w-full text-left rounded-xl border px-4 py-4 transition-colors flex items-center gap-3 focus-visible:outline-emerald-400 ${selectedId === v.id ? "border-emerald-500/40 bg-emerald-500/5" : "border-[#222] hover:border-[#444] bg-white/[0.02]"}`}
         >
           <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${getSeverityDot(v.severity)}`} aria-hidden="true" />
           <span className="flex-1 min-w-0">
@@ -454,6 +437,7 @@ function FindingsList({
           >
             {v.severity}
           </span>
+          <ChevronRight className="h-4 w-4 shrink-0 text-[#666]" aria-hidden="true" />
         </button>
       ))}
     </div>
@@ -485,16 +469,25 @@ function dedupeHeadings(md: string): string {
 function OverviewTab({
   summary,
   counts,
-  total,
+  vulnerabilities,
+  finished,
+  selectedId,
+  onSelect,
+  agentCount,
   reportMarkdown,
   raw,
 }: {
   summary: ParsedRunSummary;
   counts: Record<VulnerabilitySeverity, number>;
-  total: number;
+  vulnerabilities: Vulnerability[];
+  finished: boolean;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  agentCount: number;
   reportMarkdown: string | null;
   raw: Record<string, unknown>;
 }) {
+  const summaryMarkdown = summary.executiveSummary || reportMarkdown;
   const sections = (
     [
       ["Executive Summary", summary.executiveSummary],
@@ -508,32 +501,33 @@ function OverviewTab({
 
   return (
     <div className="space-y-6">
-      <div className="animate-card-in">
-        <RunDetails raw={raw} durationSeconds={summary.durationSeconds} />
-      </div>
-
-      {total > 0 && (
-        <div className="animate-card-in rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-5">
-          <IssueSeveritySummary findings={{ total, ...counts }} />
+      <section aria-label="Summary" className="flex gap-4 rounded-xl border border-[#222] bg-white/[0.02] p-5">
+        <FileText className="mt-0.5 h-5 w-5 shrink-0 text-[#888]" aria-hidden="true" />
+        <div className="min-w-0 flex-1 space-y-3">
+          <h2 className="text-sm font-semibold">Summary</h2>
+          {summaryMarkdown ? <div className="line-clamp-4"><ContentSection content={stripLeadingHeading(summaryMarkdown)} /></div> : <p className="text-sm text-[#aaa]">{finished ? `Scan ${summary.status?.replaceAll("_", " ") ?? "finished"}. No summary was saved.` : "Scan in progress. The summary will appear here when available."}</p>}
+          <p className="flex items-center gap-2 text-xs text-[#888]"><Bot className="h-3.5 w-3.5" aria-hidden="true" />{agentCount} {agentCount === 1 ? "agent" : "agents"}</p>
         </div>
-      )}
+      </section>
 
-      {sections.length > 0 ? (
-        <div className="animate-card-in rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-5 space-y-8">
-          {sections.map((s) => (
-            <ContentSection key={s.title} title={s.title} content={s.content} />
-          ))}
+      <section aria-label="Findings" className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">Findings <span className="text-[#888]">({vulnerabilities.length})</span></h2>
+          <div className="flex flex-wrap gap-3 text-xs text-[#aaa]" aria-label="Finding severity counts">
+            {SEVERITY_ORDER.filter(severity => counts[severity] > 0).map(severity => <span key={severity} className="inline-flex items-center gap-1.5"><span className={`h-2 w-2 rounded-full ${getSeverityDot(severity)}`} aria-hidden="true" />{counts[severity]} {severity}</span>)}
+          </div>
         </div>
-      ) : reportMarkdown ? (
-        <div className="animate-card-in rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-5">
-          <ContentSection content={dedupeHeadings(reportMarkdown)} />
-        </div>
-      ) : (
-        total === 0 && (
-          <p className="text-sm text-[#888]">No summary available for this run yet.</p>
-        )
-      )}
+        <FindingsList vulnerabilities={vulnerabilities} finished={finished} selectedId={selectedId} onSelect={onSelect} />
+      </section>
 
+      {(sections.length > 0 || reportMarkdown) && <details className="rounded-xl border border-[#222] bg-white/[0.02] p-5">
+        <summary className="cursor-pointer text-sm font-semibold text-[#ccc]">Full report</summary>
+        <div className="mt-5 space-y-8">
+          {sections.length > 0 ? sections.map(section => <ContentSection key={section.title} title={section.title} content={section.content} />) : <ContentSection content={dedupeHeadings(reportMarkdown!)} />}
+        </div>
+      </details>}
+
+      <RunDetails raw={raw} durationSeconds={summary.durationSeconds} />
     </div>
   );
 }
@@ -550,61 +544,13 @@ function TabButton({
   return (
     <button
       onClick={onClick}
+      aria-current={active ? "page" : undefined}
       className={`cursor-pointer relative pb-2.5 text-sm font-semibold transition-colors ${
         active ? "text-white" : "text-[#666] hover:text-white"
       }`}
     >
       {children}
-      {active && <span className="absolute bottom-0 inset-x-0 h-0.5 bg-white rounded-full" />}
+      {active && <span className="absolute bottom-0 inset-x-0 h-0.5 bg-emerald-400 rounded-full" />}
     </button>
-  );
-}
-
-function AgentsTab({ run, canSteer }: { run: LoadedRun; canSteer: boolean }) {
-  const { agents, events } = run.transcript;
-  const graphAgents = useMemo(() => buildGraphAgents(agents, events), [agents, events]);
-  // Clicking a graph node opens the agent's transcript in a modal; no node selected means no modal.
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selectedAgent = selectedId ? (agents.find((a) => a.id === selectedId) ?? null) : null;
-
-  // Live steering is only possible in-process (canSteer) while the scan runs.
-  const steerable = canSteer && !run.finished;
-
-  return (
-    <div className="space-y-5">
-      <div className="rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-5">
-        <div className="flex items-center gap-2">
-          <Bot className="w-4 h-4 text-[#888]" aria-hidden="true" />
-          <h2 className="text-sm font-semibold text-white">Agent graph</h2>
-          <span className="text-xs text-[#666]">
-            {agents.length} agent{agents.length === 1 ? "" : "s"}
-          </span>
-        </div>
-        <p className="mt-1 mb-4 text-xs text-[#666]">
-          Click an agent to open its full transcript.
-        </p>
-        <div className="h-[480px] rounded-lg border border-[#1a1a1a] overflow-hidden">
-          <AgentGraph
-            agents={graphAgents}
-            selectedAgentId={selectedId}
-            onSelectAgent={(id) => setSelectedId(id)}
-            eventsLoaded
-            eventsEmpty={graphAgents.size === 0}
-            scanCompleted={run.finished}
-          />
-        </div>
-      </div>
-
-      {/* Live steering: only in-process while the scan runs. Otherwise omitted. */}
-      {steerable && <ScanPromptComposer agents={agents} />}
-
-      <AgentDetailModal
-        open={selectedAgent !== null}
-        agent={selectedAgent}
-        events={events}
-        steerable={steerable}
-        onClose={() => setSelectedId(null)}
-      />
-    </div>
   );
 }

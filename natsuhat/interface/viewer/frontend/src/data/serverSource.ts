@@ -227,7 +227,7 @@ export interface ScanJob {
 export interface JobsPayload {
   jobs: ScanJob[];
   runners: { id: string; name: string; configured: boolean }[];
-  default_runner: "local" | "e2b" | "daytona";
+  default_runner: "e2b";
   max_remote_concurrent: number;
   remote_timeout_seconds: number;
 }
@@ -241,35 +241,25 @@ export interface RunnerCheck {
   release: string | null;
   checked_at: string;
   availability: "available" | "missing" | "unavailable" | "unconfigured" | "error";
-  compatibility: "revision_matches" | "name_matches" | "incompatible" | "unverified";
+  compatibility: "release_pinned" | "incompatible" | "unverified";
   message: string;
 }
 
 export interface RunnerSettings {
-  default_runner: "local" | "e2b" | "daytona" | null;
-  effective_default_runner: "local" | "e2b" | "daytona";
+  effective_default_runner: "e2b";
   e2b_template: string;
-  daytona_snapshot: string;
-  required_revision: string;
-  required_template: string;
   images: {
-    id: "e2b" | "daytona";
+    id: "e2b";
     name: string;
     configured: boolean;
     template: string;
-    selection_source: "dashboard" | "environment" | "automatic";
+    selection_source: "release";
     check: RunnerCheck | null;
   }[];
 }
 
 export async function fetchRunnerSettings(): Promise<RunnerSettings> {
   return await getJson("/api/runners/settings") as RunnerSettings;
-}
-
-export async function saveRunnerSettings(body: Pick<RunnerSettings, "default_runner" | "e2b_template" | "daytona_snapshot">): Promise<RunnerSettings> {
-  const result = await postJson("/api/runners/settings", body);
-  if (!result.ok) throw new Error(String(result.data.error ?? "Could not save runner settings."));
-  return result.data as unknown as RunnerSettings;
 }
 
 export async function checkRunner(provider: string): Promise<RunnerCheck> {

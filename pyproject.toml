@@ -53,7 +53,6 @@ dependencies = [
   "cryptography>=48.0.1,<49",
   "pyyaml>=6.0",
   "e2b==2.61.0",
-  "daytona==0.226.1",
 ]
 
 [project.scripts]

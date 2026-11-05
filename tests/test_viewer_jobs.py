@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -33,7 +34,7 @@ REQUEST = {
     "scan_mode": "standard",
     "max_budget_usd": 3.75,
     "authorized": True,
-    "runner": "local",
+    "runner": "e2b",
 }
 _REAL_IMAGE_METADATA = runner_settings.image_metadata
 
@@ -84,6 +85,8 @@ if '/results-pending/' in job['target']:
 if '/exit/' in job['target']:
     record = {'run_name': job['id'], 'status': 'completed', 'end_time': '2026-01-01T12:00:00Z'}
     (directory / 'run.json').write_text(json.dumps(record))
+if not (directory / 'runner.json').exists():
+    (directory / 'runner.json').write_text(json.dumps({'cleanup': 'paused', 'phase': 'Finished'}))
 sys.exit(code)
 """
 
@@ -98,11 +101,19 @@ def isolated_home(
 @pytest.fixture
 def child_process(monkeypatch: pytest.MonkeyPatch) -> None:
     popen = subprocess.Popen
+    monkeypatch.setenv("E2B_API_KEY", "synthetic-provider-key")
+    monkeypatch.setenv("NATSUHAT_REMOTE_MAX_CONCURRENT", "1")
 
     monkeypatch.setattr(
         runner_settings,
         "image_metadata",
-        lambda _provider, name: {"id": "synthetic-image", "names": [name], "available": True},
+        lambda _provider, name: {
+            "id": "synthetic-image",
+            "names": [name],
+            "available": True,
+            "revision": "b" * 64,
+            "resolved_template": "synthetic-image:rev-" + "b" * 64,
+        },
     )
 
     def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
@@ -140,7 +151,7 @@ def settled(manager: jobs.ScanJobManager, name: str) -> dict[str, Any]:
 
 
 @pytest.mark.usefixtures("child_process")
-@pytest.mark.parametrize("runner", ["local", "e2b"])
+@pytest.mark.parametrize("runner", ["e2b", "local", "daytona"])
 def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # noqa: PLR0915
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str
 ) -> None:
@@ -176,6 +187,8 @@ def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # no
         (directory / "runner.json").write_text(
             json.dumps({"cleanup": "paused", "sandbox_id": "same-vm", "phase": "Stopped"})
         )
+    elif runner == "daytona":
+        (directory / "runner.json").write_text(json.dumps({"cleanup": "failed"}))
     httpd, url, token = serve(
         tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
     )
@@ -195,6 +208,15 @@ def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # no
     )["providers"][0]
     manager.llm_profiles.update("select", {"id": provider["id"]})
     try:
+        if runner != "e2b":
+            legacy = request(url, "/api/jobs", cookie)[1]["jobs"][0]
+            assert legacy["status"] == "stopped" and not legacy["can_resume"]
+            assert request(url, endpoint, cookie, {"authorized": True})[0] == 409
+            if runner == "daytona":
+                assert request(url, f"/api/jobs/{name}/stop", cookie, {})[0] == 400
+            assert (directory / "job.log").read_text() == "ORIGINAL LOG\n"
+            assert (directory / "vulnerabilities.json").read_text() == findings
+            return
         assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["can_resume"]
         assert request(url, endpoint, body={"authorized": True})[0] == 403
         assert request(url, endpoint, cookie, {})[0] == 400
@@ -354,7 +376,7 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
         httpd.server_close()
 
 
-def test_runner_settings_persist_with_workspace_and_environment_precedence(
+def test_runner_settings_always_use_stable_despite_legacy_and_environment_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("E2B_API_KEY", "private-provider-key")
@@ -362,29 +384,28 @@ def test_runner_settings_persist_with_workspace_and_environment_precedence(
     base = tmp_path / "natsuhat_runs"
     httpd, url, token = serve(base / ".dashboard", manage_scans=True, open_browser=False)
     cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
-    saved = {
-        "default_runner": "daytona",
-        "e2b_template": "saved-template",
-        "daytona_snapshot": "saved-snapshot",
-    }
+    saved = {"e2b_template": "nayakas-project/natsuhat-runner:stable"}
     try:
         initial = request(url, "/api/runners/settings", cookie)[1]
-        assert initial["images"][0]["template"] == "environment-template"
-        assert initial["images"][0]["selection_source"] == "environment"
+        assert initial["images"][0]["template"] == saved["e2b_template"]
+        assert initial["images"][0]["selection_source"] == "release"
         assert "private-provider-key" not in json.dumps(initial)
         endpoint = "/api/runners/settings"
         assert request(url, endpoint, cookie, saved, Origin="https://evil.test")[0] == 403
         for invalid in (
             {"default_runner": []},
             {"e2b_template": "https://evil.test"},
-            {"daytona_snapshot": "a\nb"},
+            {"e2b_template": "a\nb"},
+            {"daytona_snapshot": "obsolete"},
             {"e2b_template": 42},
+            {"e2b_template": "another-template:stable"},
         ):
             assert request(url, endpoint, cookie, {**saved, **invalid})[0] == 400
         assert request(url, endpoint, cookie, saved)[0] == 200
-        assert request(url, "/api/jobs", cookie)[1]["default_runner"] == "daytona"
+        assert request(url, "/api/jobs", cookie)[1]["default_runner"] == "e2b"
         path = dashboard_profiles_path(tmp_path).with_name("runner-settings.json")
-        assert path.stat().st_mode & 0o777 == 0o600
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"e2b_template": "saved-template", "default_runner": "daytona"}))
         assert not list(base.glob("*/job.json"))
     finally:
         httpd.shutdown()
@@ -392,19 +413,20 @@ def test_runner_settings_persist_with_workspace_and_environment_precedence(
     restored = jobs.ScanJobManager(base)
     try:
         state = restored.runner_settings.public()
-        assert state["effective_default_runner"] == "daytona"
-        assert state["images"][0]["template"] == "saved-template"
-        assert state["images"][0]["selection_source"] == "dashboard"
-        assert state["images"][1]["template"] == "saved-snapshot"
+        assert state["effective_default_runner"] == "e2b"
+        assert "daytona_snapshot" not in state and "default_runner" not in state
+        assert state["images"][0]["template"] == saved["e2b_template"]
+        assert state["images"][0]["selection_source"] == "release"
+        assert [image["id"] for image in state["images"]] == ["e2b"]
         assert state["images"][0]["check"] is None
-        restored.runner_settings.update(
-            {"default_runner": None, "e2b_template": "", "daytona_snapshot": ""}
-        )
-        assert restored.runner_settings.public()["images"][0]["template"] == "environment-template"
         assert restored.configuration()["default_runner"] == "e2b"
+        monkeypatch.delenv("NATSUHAT_E2B_TEMPLATE")
+        default = restored.runner_settings.public()["images"][0]
+        assert default["template"] == "nayakas-project/natsuhat-runner:stable"
+        assert default["selection_source"] == "release"
         assert (
             runner_settings.RunnerSettings(tmp_path / "another-workspace").public()["e2b_template"]
-            == ""
+            == saved["e2b_template"]
         )
     finally:
         restored.close()
@@ -414,16 +436,15 @@ def test_runner_settings_persist_with_workspace_and_environment_precedence(
     "image,availability,compatibility,blocked",
     [
         ("missing", "missing", "unverified", True),
-        ("old-id", "available", "incompatible", True),
-        ("matching", "available", "name_matches", False),
-        ("custom", "available", "unverified", False),
+        ("published", "available", "release_pinned", False),
+        ("unversioned", "unavailable", "unverified", True),
         ("building", "unavailable", "unverified", True),
         ("error", "error", "unverified", True),
         ("no-key", "unconfigured", "unverified", True),
     ],
 )
 @pytest.mark.usefixtures("child_process")
-def test_runner_preflight_blocks_missing_and_stale_images_before_job_creation(
+def test_runner_preflight_pins_current_stable_without_matching_local_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     image: str,
@@ -437,21 +458,39 @@ def test_runner_preflight_blocks_missing_and_stale_images_before_job_creation(
         monkeypatch.delenv("E2B_API_KEY")
     # Exercise the real metadata parser; replace only the provider's HTTP response.
     monkeypatch.setattr(runner_settings, "image_metadata", _REAL_IMAGE_METADATA)
-    required = "natsuhat-ready-" + "a" * 16
-    monkeypatch.setattr(runner_settings, "runner_revision", lambda: "a" * 64)
+    from e2b import Template  # noqa: PLC0415
+
+    revision = "b" * 64
+    monkeypatch.setattr(
+        Template,
+        "get_tags",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(tag="stable", build_id=revision),
+            *(
+                []
+                if image == "unversioned"
+                else [SimpleNamespace(tag="rev-" + revision, build_id=revision)]
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        Template,
+        "get_build_status",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status=SimpleNamespace(value="building" if image == "building" else "ready")
+        ),
+    )
 
     def metadata_response(*_args: Any, **_kwargs: Any) -> httpx.Response:
         if image == "error":
             raise httpx.ConnectError("private-provider-key must never leak")
-        selected = "custom" if image in {"custom", "building"} else required
-        aliases = ["natsuhat-ready-" + "b" * 16] if image == "old-id" else [selected]
         rows = (
             []
             if image == "missing"
             else [
                 {
-                    "templateID": "old-id",
-                    "aliases": aliases,
+                    "templateID": "published-id",
+                    "aliases": ["nayakas-project/natsuhat-runner"],
                     "names": [],
                     "buildStatus": "building" if image == "building" else "ready",
                 }
@@ -465,12 +504,6 @@ def test_runner_preflight_blocks_missing_and_stale_images_before_job_creation(
     base = tmp_path / "natsuhat_runs"
     manager = jobs.ScanJobManager(base)
     try:
-        selected = (
-            "old-id" if image == "old-id" else "custom" if image in {"custom", "building"} else ""
-        )
-        manager.runner_settings.update(
-            {"default_runner": "e2b", "e2b_template": selected, "daytona_snapshot": ""}
-        )
         check = manager.runner_settings.check("e2b")
         assert (check["availability"], check["compatibility"]) == (availability, compatibility)
         assert "private-provider-key" not in json.dumps(check)
@@ -483,14 +516,15 @@ def test_runner_preflight_blocks_missing_and_stale_images_before_job_creation(
             job = manager.start(
                 {**REQUEST, "runner": "e2b", "target": "https://authorized.test/exit/0"}
             )
-            assert job["runner_template"] == (selected or required)
+            pinned = "published-id:rev-" + revision
+            assert job["runner_template"] == pinned
             assert settled(manager, job["id"])["status"] == "completed"
-        # A source update invalidates a cached name match without waiting for expiry.
-        if image == "matching":
-            monkeypatch.setattr(runner_settings, "runner_revision", lambda: "c" * 64)
-            assert manager.runner_settings.public()["images"][0]["check"] is None
-            with pytest.raises(jobs.JobError):
-                manager.start({**REQUEST, "runner": "e2b"})
+            # Resolve a promotion immediately, even while the settings check is cached.
+            revision = "c" * 64
+            next_job = manager.start({**REQUEST, "target": "https://authorized.test/exit/0"})
+            assert next_job["runner_template"] == "published-id:rev-" + revision
+            assert job["runner_template"] == pinned
+            assert settled(manager, next_job["id"])["status"] == "completed"
     finally:
         manager.close()
 
@@ -621,12 +655,12 @@ def test_job_exit_history_and_logs(
         restored.close()
 
 
-@pytest.mark.parametrize("runner", ["local", "e2b"])
 @pytest.mark.parametrize("budget", [3.75, -1])
 @pytest.mark.usefixtures("child_process")
 def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
-    tmp_path: Path, budget: float, runner: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, budget: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    runner = "e2b"
     monkeypatch.setenv("E2B_API_KEY", "synthetic-test-key")
     monkeypatch.setenv("NATSUHAT_REMOTE_MAX_CONCURRENT", "1")
     base = tmp_path / "natsuhat_runs"
@@ -703,13 +737,10 @@ def test_remote_http_guards_and_independent_concurrency(
         config = request(url, "/api/jobs", cookie)[1]
         assert config["default_runner"] == "e2b"
         assert config["max_remote_concurrent"] == 2
-        assert config["max_concurrent"] == 3
-        assert {r["id"]: r["configured"] for r in config["runners"]} == {
-            "local": True,
-            "e2b": True,
-            "daytona": False,
-        }
+        assert config["max_concurrent"] == 2
+        assert {r["id"]: r["configured"] for r in config["runners"]} == {"e2b": True}
         for invalid in (
+            {"runner": "local"},
             {"runner": "daytona"},
             {"runner": "unknown"},
             {"runner": []},
@@ -748,27 +779,28 @@ def test_remote_http_guards_and_independent_concurrency(
                 "target": "https://hold.example.test",
             },
         )
-        assert code == 202 and body["job"]["runner"] == "local"
+        assert code == 409
         assert request(url, "/api/jobs", cookie, REQUEST)[0] == 409
         assert httpd.job_manager is not None
         for name in remote_ids:
             request(url, f"/api/jobs/{name}/stop", cookie, {})
             assert settled(httpd.job_manager, name)["status"] == "stopped"
-        assert (
-            next(j for j in httpd.job_manager.list() if j["id"] == body["job"]["id"])["status"]
-            == "running"
+        code, body = request(
+            url, "/api/jobs", cookie, {**REQUEST, "target": "https://authorized.test/exit/2"}
         )
+        assert code == 202 and body["job"]["runner"] == "e2b"
+        assert settled(httpd.job_manager, body["job"]["id"])["status"] == "completed"
     finally:
         httpd.shutdown()
         httpd.server_close()
 
 
-@pytest.mark.parametrize("runner,retained", [("e2b", "paused"), ("daytona", "archived")])
 @pytest.mark.parametrize("pending", ["cleanup", "results"])
 @pytest.mark.usefixtures("child_process")
 def test_unconfirmed_remote_cleanup_can_be_retried_without_rerunning_scan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str, retained: str, pending: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pending: str
 ) -> None:
+    runner, retained = "e2b", "paused"
     monkeypatch.setenv(f"{runner.upper()}_API_KEY", "synthetic-test-key")
     base = tmp_path / "natsuhat_runs"
     httpd, url, token = serve(base / ".dashboard", manage_scans=True, open_browser=False)
@@ -812,10 +844,10 @@ def test_unconfirmed_remote_cleanup_can_be_retried_without_rerunning_scan(
         restored.close()
 
 
-@pytest.mark.parametrize("configured,expected", [(False, "local"), (True, "e2b")])
+@pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.usefixtures("child_process")
 def test_default_runner_for_new_jobs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool, expected: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool
 ) -> None:
     monkeypatch.delenv("NATSUHAT_REMOTE_MAX_CONCURRENT", raising=False)
     if configured:
@@ -825,10 +857,15 @@ def test_default_runner_for_new_jobs(
     manager = jobs.ScanJobManager(tmp_path / "natsuhat_runs")
     try:
         body = {key: value for key, value in REQUEST.items() if key != "runner"}
-        job = manager.start({**body, "target": "https://authorized.test/exit/2"})
-        assert manager.configuration()["default_runner"] == expected
+        assert manager.configuration()["default_runner"] == "e2b"
         assert manager.configuration()["max_remote_concurrent"] == 10
-        assert job["runner"] == expected
+        if not configured:
+            with pytest.raises(jobs.JobError, match="E2B_API_KEY"):
+                manager.start(body)
+            assert manager.list() == []
+            return
+        job = manager.start({**body, "target": "https://authorized.test/exit/2"})
+        assert job["runner"] == "e2b"
         assert settled(manager, job["id"])["status"] == "completed"
     finally:
         manager.close()
@@ -924,7 +961,7 @@ def test_job_worker_preserves_cli_options_and_run_identity(
     directory = tmp_path / "natsuhat_runs" / name
     directory.mkdir(parents=True)
     (directory / "job.json").write_text(
-        json.dumps({**REQUEST, "id": name, "max_budget_usd": budget})
+        json.dumps({**REQUEST, "runner": "local", "id": name, "max_budget_usd": budget})
     )
     (directory / "instructions.txt").write_text("Focus on object ownership.")
     monkeypatch.chdir(tmp_path)
@@ -1418,13 +1455,12 @@ def test_failed_profile_migration_retains_legacy_copy(
     assert json.loads(dashboard_profiles_path(tmp_path).read_text()) == json.loads(original)
 
 
-@pytest.mark.parametrize("runner", ["local", "e2b", "daytona"])
 @pytest.mark.usefixtures("child_process")
 def test_zip_http_upload_job_rerun_and_delete(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    runner = "e2b"
     monkeypatch.setenv("E2B_API_KEY", "synthetic-provider-key")
-    monkeypatch.setenv("DAYTONA_API_KEY", "synthetic-provider-key")
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as bundle:
         bundle.writestr("app/main.py", "print('fixture only')")

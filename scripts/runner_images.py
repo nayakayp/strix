@@ -1,5 +1,5 @@
 # ruff: noqa: INP001
-"""Build a scan-ready E2B template or Daytona snapshot from this exact checkout.
+"""Build a scan-ready E2B template from this exact checkout.
 
 Usage: uv run --frozen python scripts/runner_images.py e2b
 Requires the selected provider's API key in the environment. Creates persistent,
@@ -12,18 +12,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import shlex
 import shutil
 import tempfile
 import time
-import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 
 from natsuhat.interface.viewer.remote import (
-    RemoteSandbox,
     runner_revision,
     source_bundle,
 )
@@ -252,150 +249,22 @@ def verify_e2b(name: str, revision: str) -> None:
         logger.info("E2B verification sandbox paused and retained: %s", sandbox.sandbox_id)
 
 
-def create_daytona(name: str, context: Path, base: str | None) -> None:
-    from daytona import (  # noqa: PLC0415 - optional, script-only SDK
-        CreateSandboxFromSnapshotParams,
-        CreateSnapshotParams,
-        Daytona,
-        DaytonaBadRequestError,
-        DaytonaConfig,
-        DaytonaNotFoundError,
-        Image,
-        Resources,
-    )
-
-    client = Daytona(DaytonaConfig(otel_enabled=False))
-    try:
-        client.snapshot.get(name)
-    except DaytonaNotFoundError:
-        pass
-    else:
-        raise SystemExit(f"Daytona snapshot {name!r} already exists; choose a new name.")
-    if base is None:
-        base = name + "-base"
-        client.snapshot.create(
-            CreateSnapshotParams(
-                name=base,
-                image=Image.from_dockerfile(context / "Dockerfile", strict_context=True),
-                resources=Resources(cpu=2, memory=4, disk=20),
-            ),
-            on_logs=lambda chunk: logger.info("%s", chunk),
-            timeout=1200,
-        )
-    job_id = "image-build-" + uuid.uuid4().hex
-    try:
-        sandbox = client.create(
-            CreateSandboxFromSnapshotParams(
-                name=job_id,
-                snapshot=base,
-                os_user="runner",
-                public=False,
-                labels={"natsuhat_job": job_id},
-                auto_stop_interval=60,
-                auto_archive_interval=1,
-                auto_delete_interval=-1,
-                ttl_minutes=0,
-            ),
-            timeout=90,
-        )
-        sandbox.fs.upload_file(
-            (context / "source.tar.gz").read_bytes(), "/home/runner/source.tar.gz"
-        )
-        sandbox.fs.upload_file(
-            (context / "manifest.json").read_bytes(), "/home/runner/manifest.json"
-        )
-        result = sandbox.process.exec(
-            "sudo -n mv /home/runner/manifest.json /opt/natsuhat-runner.json && "
-            "sudo -n bash -c " + shlex.quote(STAGE),
-            timeout=3600,
-        )
-        logger.info("%s", result.result)
-        if result.exit_code != 0:
-            raise RuntimeError("Daytona image preparation failed.")
-        # Cold snapshots preserve a clean Docker data directory, not running processes.
-        sandbox.stop(timeout=60)
-        sandbox.create_snapshot(name, timeout=1200)
-        logger.info("Daytona prepared snapshot created: %s", name)
-    except DaytonaBadRequestError as exc:
-        if "Disk request" in str(exc) and "non-ephemeral" in str(exc):
-            raise SystemExit(
-                "Daytona refused the preparation VM: its snapshot exceeds this account's "
-                "retained-sandbox disk quota. No ephemeral fallback or account changes were made."
-            ) from None
-        raise
-    finally:
-        retained = RemoteSandbox("daytona", job_id)
-        for attempt in range(3):
-            try:
-                retained.retain()
-                break
-            except Exception:
-                if attempt == 2:
-                    raise
-    verify_daytona(name)
-
-
-def verify_daytona(name: str) -> None:
-    """Check a fresh VM from the final snapshot, not the preparation filesystem."""
-    from daytona import (  # noqa: PLC0415
-        CreateSandboxFromSnapshotParams,
-        Daytona,
-        DaytonaConfig,
-    )
-
-    client = Daytona(DaytonaConfig(otel_enabled=False))
-    job_id = "image-verify-" + uuid.uuid4().hex
-    try:
-        sandbox = client.create(
-            CreateSandboxFromSnapshotParams(
-                name=job_id,
-                snapshot=name,
-                os_user="runner",
-                public=False,
-                labels={"natsuhat_job": job_id},
-                auto_stop_interval=5,
-                auto_archive_interval=1,
-                auto_delete_interval=-1,
-                ttl_minutes=0,
-            ),
-            timeout=90,
-        )
-        result = sandbox.process.exec(SMOKE, timeout=180)
-        logger.info("%s", result.result)
-        if result.exit_code != 0:
-            raise RuntimeError("Daytona runner image smoke test failed.")
-    finally:
-        retained = RemoteSandbox("daytona", job_id)
-        for attempt in range(3):
-            try:
-                state = retained.retain()
-                logger.info("Daytona verification sandbox %s: %s", retained.id, state)
-                break
-            except Exception:
-                if attempt == 2:
-                    raise
-
-
 if __name__ == "__main__":
     logging.basicConfig(format="%(message)s")
     logger.setLevel(logging.INFO)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("provider", choices=("e2b", "daytona"))
+    parser.add_argument("provider", choices=("e2b",), nargs="?", default="e2b")
     naming = parser.add_mutually_exclusive_group()
     naming.add_argument("--name", help="Override the content-versioned image name.")
     naming.add_argument(
         "--release", help="E2B family name; publish rev-<hash>, then promote stable."
     )
-    parser.add_argument("--base", help="Reuse an existing minimal runner template/snapshot.")
+    parser.add_argument("--base", help="Reuse an existing minimal E2B runner template.")
     parser.add_argument(
-        "--skip-smoke", action="store_true", help="E2B only: publish without sandbox smoke tests."
+        "--skip-smoke", action="store_true", help="Publish without sandbox smoke tests."
     )
     args = parser.parse_args()
-    if args.skip_smoke and args.provider != "e2b":
-        parser.error("--skip-smoke is supported only for E2B.")
-    if args.release and (
-        args.provider != "e2b" or ":" in args.release or any(c.isspace() for c in args.release)
-    ):
+    if args.release and (":" in args.release or any(c.isspace() for c in args.release)):
         parser.error("--release requires an E2B family name without a tag or whitespace.")
     bundle = source_bundle()
     revision = runner_revision(bundle)
@@ -411,9 +280,4 @@ if __name__ == "__main__":
             shutil.copyfile(CONTEXT / filename, context / filename)
         (context / "source.tar.gz").write_bytes(bundle)
         (context / "manifest.json").write_text(json.dumps({"revision": revision}))
-        if args.provider == "e2b":
-            create_e2b(
-                name, context, args.base, release=bool(args.release), smoke=not args.skip_smoke
-            )
-        else:
-            create_daytona(name, context, args.base)
+        create_e2b(name, context, args.base, release=bool(args.release), smoke=not args.skip_smoke)

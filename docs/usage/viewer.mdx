@@ -37,12 +37,12 @@ The UI ships prebuilt with Natsuhat, so there is no extra install and no JavaScr
 
 ## What Is In The Dashboard
 
-- **Overview** — run status, target, and a severity breakdown of everything found so far.
-- **Vulnerabilities** — each validated finding with its severity, details, and reproduction steps.
-- **Agent graph** — a live map of the multi-agent team, and what each agent is doing.
+- **Overview** — a compact summary followed by findings and severity counts. Run configuration and the full report are collapsed until opened; there is no separate Issues tab.
+- **Findings** — select a row to read its complete Markdown in a right-side panel, including evidence, reproduction steps, and remediation. The panel fills the screen at narrow widths. Close it with Escape or the close button without losing your place in Overview.
+- **Agents** — an expandable parent–child tree with the selected agent's transcript alongside it. Live activity follows new events only when you are already reading at the bottom.
 - **Steering** — send instructions to a live scan to redirect the agents during the run. Steering works only in the dashboard the running scan opens. A standalone `natsuhat view` has no live scan to steer.
 - **History** — browse runs alongside the opened run in the same `natsuhat_runs/` directory. The private viewer link authorizes access; email verification is not required.
-- **Scans** — choose Local Docker, E2B, or Daytona; start a headless scan, inspect its status and log, stop it, and open its results. Available only with `--manage-scans`.
+- **Scans** — start an isolated E2B scan, inspect its status and log, stop it, and open its results. Available only with `--manage-scans`.
 - **Reports** — read the report saved locally with each run.
 
 ## Managing Scans
@@ -55,24 +55,23 @@ Open the private URL printed by the command, then choose **Scans**. This
 works before the first run exists. Management currently requires Linux or macOS
 and a Python installation (uv/pip), not the standalone bundled executable.
 
-Configure Docker, the sandbox image, and your LLM provider as you would for a
-normal CLI scan. The worker reuses the headless CLI and inherits the server's
-environment and CLI configuration unless you select a dashboard LLM profile.
-Local paths refer to the server, not the browser's computer; source directories
-are mounted writable, just as in the CLI. Only submit targets you may test.
+Configure `E2B_API_KEY`, access to the published stable E2B release, and your LLM provider.
+The dashboard server does not need Docker; the E2B template contains Docker and
+the tool image. Choose a target URL, domain, IP, GitHub repository, or ZIP upload,
+not a server filesystem path. Only submit targets you may test.
 
 Each start requires a target, scan mode, LLM budget in USD, and explicit
 authorization. Set a positive amount for a spending cap, or **`-1` for unlimited
 LLM spending**. Zero, other negative values, and non-finite values are rejected.
 Unlimited jobs are shown as **Unlimited LLM budget**; their workers omit the
 CLI's `--max-budget` flag, using the engine's existing uncapped behavior.
-In-flight model calls can overshoot a finite budget. One local scan and up to
-ten remote scans may run concurrently by default. Additional starts for a full runner
+In-flight model calls can overshoot a finite budget. Up to
+ten E2B scans may run concurrently by default. Additional starts for a full runner
 pool return `409` rather than queueing. Independently launched CLI scans are not
 managed or counted.
 
 Only **failed** jobs show **Rerun**. Confirm authorization again to create a new
-job with the same target, runner, mode, budget (including `-1`), and saved instructions.
+E2B job with the same target, mode, budget (including `-1`), and saved instructions.
 The rerun uses the currently selected LLM settings and leaves the original job,
 logs, and results unchanged. This starts over; it does not resume a scan. Reruns
 are disabled when that runner pool is full or remote cleanup is unconfirmed.
@@ -85,113 +84,94 @@ LLM settings. Confirm authorization again and set a **total** LLM budget: earlie
 spending still counts. An exhausted cap must be increased, or set to `-1` for
 unlimited spending. Existing concurrency limits still apply.
 
-Remote resumes restore the original retained E2B or Daytona sandbox and use its
+Resumes restore the original retained E2B sandbox and use its
 installed engine, not the current stable image or a newly created VM. A small
 dashboard resume adapter supports older retained images with CLI checkpoint
 support; dependencies and security tools are not reinstalled. Resumed provider
-compute is billable. Local resumes recreate the tool sandbox. Neither approach
-restores terminated commands, network connections, or in-flight model requests;
+compute is billable. Resuming does not
+restore terminated commands, network connections, or in-flight model requests;
 agents continue from their latest saved checkpoint. Completed scans, missing
 checkpoints, and missing remote sandboxes cannot resume. Pending results or
 unconfirmed cleanup must be recovered first.
 
 If result transfer fails, **Retry results** retrieves files from the retained
 sandbox without launching another scan. It briefly resumes provider compute,
-then pauses or archives the sandbox again; provider charges may apply. Recovery
+then pauses the sandbox again; provider charges may apply. Recovery
 is explicit, survives dashboard restarts, and blocks **Rerun** until results and
 retention are confirmed. A partial recovered run is marked interrupted rather
 than left running. Findings withdrawn on the worker are removed from subsequent
 dashboard snapshots; controller job metadata is preserved.
 
 Jobs and their logs are persisted in `natsuhat_runs/<job-id>/job.json` and `job.log`,
-alongside normal run artifacts. Logs may contain sensitive scan output. The UI
-shows the last 32 KiB of each controller and remote log; the full controller log
-remains on disk.
+alongside normal run artifacts. Logs may contain sensitive scan output and remain
+on disk. Failed cards show the saved failure reason and a collapsed **Failure log**
+with the last 32 KiB of each controller and remote log. **Retry loading log** retries
+only the log read, not the scan. Running and successful cards have no log control.
+Click a card to open scan details.
+Website, repository, and ZIP scans have distinct icons. Hover or focus an action
+icon to see its label; stopping, deleting, and recovery do not open the card.
 
 Closing the browser does not stop the scan. Stopping the viewer stops its active
-children with SIGTERM, allowing normal CLI cleanup. After 30 seconds a stuck local
-child is force-killed; inspect Docker for leftover scan containers if that occurs.
-Remote workers get up to eighteen minutes for final synchronization and VM pause/archive.
+children with SIGTERM. Workers get up to eighteen minutes for final
+synchronization and E2B pause before a stuck process is force-killed.
 Completed job history survives viewer restarts. After an unexpected viewer exit,
 an inherited owner lock prevents another manager from starting until its old
 worker exits; stale active records are then marked interrupted. There is no
 automatic restart, adoption of saved PIDs, or automatic scan resumption. Use
 **Resume scan** explicitly after recovery if a checkpoint is available.
 
-### E2B And Daytona Runners
+### E2B Sandbox
 
-Set `E2B_API_KEY` and/or `DAYTONA_API_KEY` on the dashboard server, using a secret
-manager rather than a committed file. E2B is the default for new scans when its
-key is configured; otherwise Local Docker is the default. Daytona stays available
-as an explicit choice. **Sandbox runners** settings can override the default
-and persist an E2B template or Daytona snapshot name/ID for this workspace.
-Selections live in `~/.natsuhat/dashboard/<workspace hash>/runner-settings.json`,
-outside scan sources. Explicit dashboard selections override server environment
-image settings; blank fields use the environment override or the required content
-version. These settings apply only to new dashboard jobs, not CLI defaults.
+E2B is the only dashboard runner. Set `E2B_API_KEY` on the dashboard server using
+a secret manager, not a committed file. A missing key blocks scans; there is no
+local Docker fallback. **`nayakas-project/natsuhat-runner:stable` is the only
+template source.** Saved template selections and `NATSUHAT_E2B_TEMPLATE` do not
+override it. **Settings → Sandbox → E2B** displays this fixed source and offers
+read-only availability checks.
 
-The settings page shows the required application revision and offers read-only
-provider availability checks. Missing, unavailable, or recognizably older images
-are rejected before creating a job or billable VM. A matching versioned name is
-not proof of image contents; custom names/IDs without versioned aliases remain
-unverified. The worker still checks the full image manifest before sending LLM
-credentials. Checks expire after 60 seconds and are invalidated by application
-or selection changes. Checking or saving settings never builds an image or
-starts a sandbox. E2B tagged selections such as **`natsuhat-runner:stable`** resolve
-to a provider build and a full `rev-<content hash>` tag. Settings show both; each
-new job saves that revision tag rather than the moving `stable` tag. The revision
-must match this application's full content hash. An unrelated newer failed or
-building release does not invalidate an existing ready stable build.
+The settings page displays failures only. Missing or unavailable stable releases,
+or releases without a unique `rev-<content hash>` tag, are rejected before creating
+a job or billable VM. Every new scan resolves stable afresh and saves its pinned
+revision tag. Settings checks expire after 60 seconds; scan submission never uses
+that cached selection. Existing jobs keep their original release even when stable
+is promoted. The worker checks the actual manifest against the pinned release and
+checks the prepared runtime and Docker image before sending LLM credentials.
+Local application or dependency changes do not invalidate the published release.
+An unrelated newer failed or building release does not invalidate a ready stable
+build. Availability checks never build an image or start a sandbox.
 
-Publish an updateable E2B family:
+To intentionally update the scan runtime, publish the authoritative family:
 
 ```bash
-uv run --frozen python scripts/runner_images.py e2b --release natsuhat-runner
+uv run --frozen python scripts/runner_images.py --release nayakas-project/natsuhat-runner
 # Later updates can reuse the prepared stable image:
-uv run --frozen python scripts/runner_images.py e2b --release natsuhat-runner --base natsuhat-runner:stable
+uv run --frozen python scripts/runner_images.py --release nayakas-project/natsuhat-runner --base nayakas-project/natsuhat-runner:stable
 ```
 
-The builder creates `natsuhat-runner:rev-<full content hash>` and, by default,
+These commands create persistent, potentially billable E2B resources.
+The builder creates `nayakas-project/natsuhat-runner:rev-<full content hash>` and, by default,
 checks a fresh sandbox and the same sandbox after pause/resume before promoting
-`natsuhat-runner:stable`. Failed smoke tests leave stable unchanged. Existing
+`nayakas-project/natsuhat-runner:stable`. Failed smoke tests leave stable unchanged. Existing
 revision tags are reused and rechecked, never overwritten by this builder.
-Older revision tags remain available for rollback: select one in Settings, or
-publish again from its matching checkout to promote it back to stable. E2B tags
+Older revision tags remain available for rollback: publish again from the desired
+checkout to promote its release back to stable. E2B tags
 can be reassigned externally, so the worker still verifies the actual manifest.
 `--skip-smoke` explicitly bypasses sandbox tests and publishes after the build
-finishes; it does not establish runtime compatibility. Save
-`natsuhat-runner:stable` in **Sandbox runners → E2B template name, tag, or ID**.
-Application source changes still require republishing; stable is not an automatic
-build or a bypass for the manifest check.
+finishes; it does not establish runtime compatibility. Stable controls the installed
+scan engine; it is neither an automatic build nor a bypass for manifest checks.
 
-The original content-named E2B templates and Daytona snapshots are also supported:
-
-```bash
-uv run --frozen python scripts/runner_images.py e2b
-uv run --frozen python scripts/runner_images.py daytona
-```
-
-These commands create persistent, potentially billable templates/snapshots, run
-a nested-Docker smoke test, and retain its VM paused (E2B) or archived (Daytona). These
-legacy commands refuse to replace an existing name. The image source is `containers/runner/`. The builder
+The image source is `containers/runner/`. The builder
 installs the exact application and frozen Python dependencies and builds the
-Kali tool image **once**, before saving the template/snapshot. This one-time
-build may take tens of minutes. E2B captures Docker already running; Daytona
-snapshots a prepared, stopped VM and starts Docker when a new VM boots.
-
-Image names default to `natsuhat-ready-<content revision>`, derived from the
-application, lockfile, and image build inputs, not Git or archive timestamps.
-Rebuild after changing those inputs. `--base natsuhat-runner-v1` reuses an
-existing minimal host image. `--name` overrides the generated name;
-`NATSUHAT_E2B_TEMPLATE` and `NATSUHAT_DAYTONA_SNAPSHOT` select custom names.
+Kali tool image **once**, before saving the template. This one-time
+build may take tens of minutes. E2B captures Docker already running.
 
 Every submitted remote scan gets a separate VM with its application, dependencies,
-and tools already installed. The controller checks the image revision and local
+and tools already installed. The controller checks the pinned release and prepared
 Docker image, sends only the job, optional instructions and LLM connection, and
 launches the installed Python directly. There is **no per-scan source upload,
-dependency installation, image pull, or tool build**. Missing, stale, or incomplete
+dependency installation, image pull, or tool build**. Missing, mismatched, or incomplete
 images fail clearly before receiving model credentials; there is no cold-build fallback.
-Local server source directories, Git history, other runs, and E2B/Daytona credentials
+Local server source directories, Git history, other runs, and E2B credentials
 are not uploaded. Remote targets must be reachable URLs, domains, IPs, or HTTPS
 repositories, not local paths or credential-bearing URLs. A remote `localhost`
 refers to that new VM, not the dashboard server.
@@ -221,40 +201,27 @@ If E2B falls back to a filesystem-only snapshot under snapshot pressure, the
 controller detects the reboot and fails the scan without replaying it. Its files
 and existing results remain retained; process-memory recovery is not possible.
 
-Completion, cancellation, and failures retain E2B sandboxes **paused** and
-Daytona sandboxes **stopped and archived**, without deleting their data.
+Completion, cancellation, and failures retain E2B sandboxes **paused** without
+deleting their data.
 Traffic-triggered E2B auto-resume is disabled, so an old URL cannot restart compute.
 Paused E2B resources are not automatically resumed when the dashboard restarts.
-Daytona auto-delete and TTL are disabled; if the controller disappears, an idle
-sandbox stops after five minutes and archives after one stopped minute. E2B
-pauses at its session timeout. Retained sandboxes and credentials in their memory
+If the controller disappears, E2B pauses at its session timeout.
+Retained sandboxes and credentials in their memory
 remain subject to your provider account's access controls and retention policies.
-Daytona's archived container sandboxes are not billed; stopped ones still incur
-disk charges. Check current provider pricing for paused storage and retained images.
-Unconfirmed pause/archive
+Check current provider pricing for paused storage and retained images.
+Unconfirmed pause
 shows **Retry cleanup** and blocks rerunning that job. After a controller
-restart, unresolved remote resources are paused/archived without restarting scans.
-Verify the provider console if cleanup remains unconfirmed. Archiving is
-asynchronous and may take several minutes; only a confirmed archived state is
-reported as successful retention.
-
-Daytona must permit outbound access to package repositories during image preparation,
-and to the selected model endpoint and scan targets during scans. Its restricted
-organization tiers block arbitrary destinations; sandbox allow lists cannot
-override that organization policy. Preinstalling tools does not remove the model
-and target connectivity requirements.
-See [Daytona network limits](https://www.daytona.io/docs/en/network-limits/).
-Retained Daytona sandboxes also require a snapshot whose disk size fits the
-account's **non-ephemeral** sandbox quota. Some accounts permit a 20 GB ephemeral
-sandbox but only a 10 GB retained sandbox. The runner will not fall back to
-ephemeral mode because stopping it would delete the data.
+restart, unresolved E2B resources are paused without restarting scans.
+Verify the provider console if cleanup remains unconfirmed. Historical scans
+from other runners remain readable, but cannot be resumed or recovered through
+this dashboard. Recover their remote resources with the original provider.
 
 The session-protected JSON endpoints are:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/jobs` | List jobs, resume eligibility/reason, runner availability/default, concurrency limits, remote phase/cleanup/resume count, and result availability |
-| POST | `/api/jobs` | Start with `target`, `scan_mode`, `max_budget_usd`, `authorized: true`, optional `runner` (`local`, `e2b`, `daytona`; defaults to E2B when configured, otherwise local), and optional `instruction` |
+| POST | `/api/jobs` | Start with `target`, `scan_mode`, `max_budget_usd`, `authorized: true`, optional `runner` (`e2b` only, also the default), and optional `instruction` |
 | POST | `/api/jobs/<id>/rerun` | Start a new job from a failed job with `authorized: true`; other statuses return `409` |
 | POST | `/api/jobs/<id>/resume` | Continue a stopped/interrupted checkpoint with `authorized: true` and optional `max_budget_usd` (total cap, defaults to the previous cap); unavailable checkpoints or capacity return `409` |
 | POST | `/api/jobs/<id>/stop` | Stop a job, recover pending results, or retry failed remote cleanup (safe to repeat; result recovery can resume compute) |

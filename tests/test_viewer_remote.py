@@ -32,12 +32,19 @@ if TYPE_CHECKING:
         ("ready", True),
     ],
 )
-def test_prepared_runner_scans_without_installing_and_rejects_stale_images(  # noqa: PLR0915 - prepared runner lifecycle
+def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # noqa: PLR0915 - prepared runner lifecycle
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest: str, with_source: bool
 ) -> None:
     controller, vm_root = tmp_path / "controller", tmp_path / "vm"
     controller.mkdir()
-    job: dict = {"id": "prepared-scan", "runner": "e2b", "target": "https://authorized.test"}
+    release_revision = "b" * 64
+    monkeypatch.setattr(remote, "runner_revision", lambda: "a" * 64)
+    job: dict = {
+        "id": "prepared-scan",
+        "runner": "e2b",
+        "target": "https://authorized.test",
+        "runner_template": "published-template:rev-" + release_revision,
+    }
     if with_source:
         monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
         store = SourceStore(controller.parent.parent)
@@ -119,11 +126,7 @@ def test_prepared_runner_scans_without_installing_and_rejects_stale_images(  # n
                 if manifest == "missing":
                     raise FileNotFoundError("No prepared image manifest")
                 return json.dumps(
-                    {
-                        "revision": remote.runner_revision()
-                        if manifest in {"ready", "recover"}
-                        else "old"
-                    }
+                    {"revision": release_revision if manifest in {"ready", "recover"} else "old"}
                 )
             if "docker image inspect" in command:
                 return ""  # Only the provider and Docker daemon are substituted.

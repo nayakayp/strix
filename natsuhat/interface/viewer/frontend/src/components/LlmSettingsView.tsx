@@ -141,7 +141,6 @@ export default function LlmSettingsView() {
         <label className="block text-sm text-[#aaa]">Base URL<input required type="url" maxLength={2048} className={input} value={draft.base_url} onChange={e => setDraft({ ...draft, base_url: e.target.value })} />
           <span className="mt-1 block text-xs text-[#888]">Reached from this server, not your browser. Include /v1 for OpenAI-compatible APIs; use the server root for Anthropic and Ollama.</span>
         </label>
-        {draft.base_url.startsWith("http:") && <p className="text-xs text-amber-400">HTTP is unencrypted. Use only on a trusted local network; use HTTPS for remote providers.</p>}
         <label className="block text-sm text-[#aaa]">API key<input type="password" autoComplete="new-password" maxLength={4096} className={input} value={draft.api_key} placeholder={saved?.has_api_key ? "Key saved — leave blank to keep it" : "Enter API key (optional for local providers)"} onChange={e => setDraft({ ...draft, api_key: e.target.value })} />
           <span className="mt-1 block text-xs text-[#888]">Write-only. Stored per workspace under ~/.natsuhat/dashboard with owner-only permissions, not encrypted. Excluded from scan sources. Never returned to the browser.</span>
         </label>

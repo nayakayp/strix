@@ -55,7 +55,7 @@ export function RunDetails({
   raw: Rec;
   durationSeconds: number | null;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   // Configuration (launch inputs)
   const targets = arr(raw.targets_info).map((t) => {
@@ -116,7 +116,7 @@ export function RunDetails({
         className="flex w-full cursor-pointer items-center gap-2 text-left"
       >
         <Info className="h-4 w-4 text-[#888]" aria-hidden="true" />
-        <h2 className="text-sm font-semibold text-white">Run details</h2>
+        <h2 className="text-sm font-semibold text-white">Run configuration</h2>
         {open ? (
           <ChevronUp className="ml-auto h-4 w-4 text-[#666]" aria-hidden="true" />
         ) : (

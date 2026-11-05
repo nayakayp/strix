@@ -2,7 +2,7 @@
 
 Provider credentials stay on the controller. Application dependencies and tools
 are baked into a versioned image; only the job and selected LLM connection are
-staged. Idle sandboxes are paused or archived, never deleted.
+staged. Idle E2B sandboxes are paused, never deleted.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ import io
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import tarfile
-import tempfile
 import threading
 import time
 from datetime import UTC, datetime
@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 REMOTE_ROOT = "/home/runner/natsuhat"
 SDK_TIMEOUT = 30
 RETAINED = {"deleted", "not_created", "paused", "archived"}
+DEFAULT_E2B_TEMPLATE = "nayakas-project/natsuhat-runner:stable"
 
 
 def remote_limit() -> int:
@@ -50,130 +51,71 @@ def remote_timeout() -> int:
     return max(300, min(86400, int(os.getenv("NATSUHAT_REMOTE_TIMEOUT_SECONDS", "14400"))))
 
 
-def default_runner() -> str:
-    return "e2b" if os.getenv("E2B_API_KEY") else "local"
-
-
 def runners() -> list[dict[str, Any]]:
     return [
-        {"id": "local", "name": "Local Docker", "configured": True},
         {"id": "e2b", "name": "E2B", "configured": bool(os.getenv("E2B_API_KEY"))},
-        {"id": "daytona", "name": "Daytona", "configured": bool(os.getenv("DAYTONA_API_KEY"))},
     ]
 
 
 def validate_runner(provider: Any, target: str) -> str:
-    if not isinstance(provider, str) or provider not in {r["id"] for r in runners()}:
-        raise JobError("Choose Local Docker, E2B, or Daytona.")
-    if not next(r["configured"] for r in runners() if r["id"] == provider):
-        raise JobError(f"Set the {provider.upper()}_API_KEY on the dashboard server first.")
-    if provider != "local":
-        try:
-            parsed = urlsplit(target if "://" in target else "//" + target)
-        except ValueError:
-            raise JobError("Invalid remote target URL.") from None
-        if (
-            not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or (parsed.scheme and parsed.scheme not in {"http", "https"})
-            or target.startswith(("/", ".", "~"))
-        ):
-            raise JobError(
-                "Remote scans accept URLs, domains, IPs, or HTTPS repositories, not local paths."
-            )
+    if not isinstance(provider, str) or provider != "e2b":
+        raise JobError("Dashboard scans use E2B only.")
+    if not os.getenv("E2B_API_KEY"):
+        raise JobError("Set E2B_API_KEY on the dashboard server first.")
+    try:
+        parsed = urlsplit(target if "://" in target else "//" + target)
+    except ValueError:
+        raise JobError("Invalid remote target URL.") from None
+    if (
+        not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or (parsed.scheme and parsed.scheme not in {"http", "https"})
+        or target.startswith(("/", ".", "~"))
+    ):
+        raise JobError("E2B scans accept URLs, domains, IPs, or source uploads, not local paths.")
     return provider
 
 
 class RemoteSandbox:
-    """The small provider seam used by the scan controller."""
+    """An E2B sandbox owned by one scan controller."""
 
     def __init__(self, provider: str, job_id: str, template: str | None = None) -> None:
-        self.provider = provider
+        if provider != "e2b":
+            raise JobError("This sandbox runner is no longer supported. Dashboard scans use E2B.")
         self.job_id = job_id
         self.template = template
         self.resource: Any = None
-        self.client: Any = None
         self.id: str | None = None
 
     def create(self) -> None:
-        if self.provider == "e2b":
-            from e2b import Sandbox  # noqa: PLC0415 - SDK only in remote worker
+        from e2b import Sandbox  # noqa: PLC0415 - SDK only in remote worker
 
-            self.resource = Sandbox.create(
-                self.template or os.getenv("NATSUHAT_E2B_TEMPLATE", runner_image_name()),
-                timeout=min(3600, remote_timeout()),
-                lifecycle={"on_timeout": "pause", "auto_resume": False},
-                metadata={"natsuhat_job": self.job_id},
-                idempotency_key=self.job_id,
-                request_timeout=90,
-            )
-            self.id = str(self.resource.sandbox_id)
-        else:
-            from daytona import (  # noqa: PLC0415 - SDK only in remote worker
-                CreateSandboxFromSnapshotParams,
-                Daytona,
-                DaytonaBadRequestError,
-                DaytonaConfig,
-            )
-
-            self.client = Daytona(DaytonaConfig(otel_enabled=False))
-            try:
-                self.resource = self.client.create(
-                    CreateSandboxFromSnapshotParams(
-                        name=self.job_id,
-                        snapshot=self.template
-                        or os.getenv("NATSUHAT_DAYTONA_SNAPSHOT", runner_image_name()),
-                        os_user="runner",
-                        public=False,
-                        labels={"natsuhat_job": self.job_id},
-                        auto_stop_interval=5,
-                        auto_archive_interval=1,
-                        auto_delete_interval=-1,
-                        ttl_minutes=0,
-                    ),
-                    timeout=90,
-                )
-            except DaytonaBadRequestError as exc:
-                if "Disk request" in str(exc) and "non-ephemeral" in str(exc):
-                    raise JobError(
-                        "The Daytona snapshot exceeds this account's disk limit for retained "
-                        "sandboxes. Choose a smaller NATSUHAT_DAYTONA_SNAPSHOT or request higher "
-                        "provider limits. Ephemeral sandboxes would delete data on stop, so "
-                        "no ephemeral fallback is used."
-                    ) from None
-                raise
-            self.id = str(self.resource.id)
+        self.resource = Sandbox.create(
+            self.template or DEFAULT_E2B_TEMPLATE,
+            timeout=min(3600, remote_timeout()),
+            lifecycle={"on_timeout": "pause", "auto_resume": False},
+            metadata={"natsuhat_job": self.job_id},
+            idempotency_key=self.job_id,
+            request_timeout=90,
+        )
+        self.id = str(self.resource.sandbox_id)
 
     def find(self) -> bool:
         """Recover only our labelled VM, including an ambiguous create response."""
-        if self.provider == "e2b":
-            from e2b import Sandbox, SandboxQuery  # noqa: PLC0415
+        from e2b import Sandbox, SandboxQuery  # noqa: PLC0415
 
-            matches = Sandbox.list(
-                query=SandboxQuery(metadata={"natsuhat_job": self.job_id}),
-                request_timeout=SDK_TIMEOUT,
-            ).next_items(request_timeout=SDK_TIMEOUT)
-            if not matches:
-                return False
-            self.id = matches[0].sandbox_id
-        else:
-            from daytona import Daytona, DaytonaConfig, DaytonaNotFoundError  # noqa: PLC0415
-
-            self.client = Daytona(DaytonaConfig(otel_enabled=False))
-            try:
-                self.resource = self.client.get(self.job_id, request_timeout=SDK_TIMEOUT)
-            except DaytonaNotFoundError:
-                return False
-            if self.resource.labels.get("natsuhat_job") != self.job_id:
-                raise RuntimeError("Refusing to use an unowned remote sandbox.")
-            self.id = str(self.resource.id)
+        matches = Sandbox.list(
+            query=SandboxQuery(metadata={"natsuhat_job": self.job_id}),
+            request_timeout=SDK_TIMEOUT,
+        ).next_items(request_timeout=SDK_TIMEOUT)
+        if not matches:
+            return False
+        self.id = matches[0].sandbox_id
         return True
 
     def resume(self) -> bool:
         """Resume the same VM, without replaying its launch or renewing running sessions."""
-        if self.provider != "e2b":
-            return False
         from e2b import Sandbox  # noqa: PLC0415
 
         assert self.id is not None
@@ -188,84 +130,37 @@ class RemoteSandbox:
         """Reconnect a retained VM for file recovery, never create another VM."""
         if not self.find():
             raise JobError("The retained sandbox could not be found; results remain pending.")
-        if self.provider == "e2b":
-            from e2b import Sandbox  # noqa: PLC0415
+        from e2b import Sandbox  # noqa: PLC0415
 
-            assert self.id is not None
-            self.resource = Sandbox.connect(self.id, timeout=300, request_timeout=90)
-        elif self.resource.state != "started":
-            self.resource.start(timeout=600)
+        assert self.id is not None
+        self.resource = Sandbox.connect(self.id, timeout=300, request_timeout=90)
 
     def command(self, command: str, *, background: bool = False) -> str:
-        if self.provider == "e2b":
-            result = self.resource.commands.run(
-                command,
-                background=background,
-                timeout=remote_timeout() if background else SDK_TIMEOUT,
-                request_timeout=SDK_TIMEOUT + 5,
-            )
-            if background:
-                return ""
-            return str(result.stdout)
-        if background:
-            from daytona import SessionExecuteRequest  # noqa: PLC0415
-
-            session = "scan-" + str(time.time_ns())
-            self.resource.process.create_session(session, request_timeout=SDK_TIMEOUT)
-            self.resource.process.execute_session_command(
-                session,
-                SessionExecuteRequest(command=command, run_async=True),
-                timeout=SDK_TIMEOUT,
-            )
-            return ""
-        result = self.resource.process.exec(command, timeout=SDK_TIMEOUT)
-        if result.exit_code != 0:
-            raise RuntimeError("Remote command failed; check the runner log.")
-        return str(result.result)
+        result = self.resource.commands.run(
+            command,
+            background=background,
+            timeout=remote_timeout() if background else SDK_TIMEOUT,
+            request_timeout=SDK_TIMEOUT + 5,
+        )
+        return "" if background else str(result.stdout)
 
     def upload(self, path: str, data: bytes) -> None:
-        if self.provider == "e2b":
-            self.resource.files.write(path, data, request_timeout=SDK_TIMEOUT)
-        else:
-            self.resource.fs.upload_file(data, path, timeout=SDK_TIMEOUT)
+        self.resource.files.write(path, data, request_timeout=SDK_TIMEOUT)
 
     def download(self, path: str) -> bytes:
-        if self.provider == "e2b":
-            return bytes(
-                self.resource.files.read(path, format="bytes", request_timeout=SDK_TIMEOUT)
-            )
-        # The SDK's two-string overload writes a local file with a bounded timeout.
-        with tempfile.TemporaryDirectory() as temporary:
-            local = Path(temporary) / "download"
-            self.resource.fs.download_file(path, str(local), SDK_TIMEOUT)
-            return local.read_bytes()
+        return bytes(self.resource.files.read(path, format="bytes", request_timeout=SDK_TIMEOUT))
 
     def retain(self) -> str:
         # Look up by our unique label/name; never wake a VM merely to stop it.
         if not self.find():
             return "not_created"
         assert self.id is not None
-        if self.provider == "e2b":
-            from e2b import Sandbox  # noqa: PLC0415
+        from e2b import Sandbox  # noqa: PLC0415
 
-            Sandbox.pause(self.id, request_timeout=90)
-            if Sandbox.get_info(self.id, request_timeout=SDK_TIMEOUT).state != "paused":
-                raise RuntimeError("Sandbox pause is unconfirmed.")
-            return "paused"
-        if self.resource.state != "archived":
-            # Disarm legacy ephemeral/TTL settings before stopping: either can delete data.
-            self.resource.set_auto_delete_interval(-1, request_timeout=SDK_TIMEOUT)
-            self.resource.set_ttl(0, request_timeout=SDK_TIMEOUT)
-            if self.resource.state != "archiving":
-                self.resource.stop(timeout=60)
-                self.resource.archive(request_timeout=SDK_TIMEOUT)
-            deadline = time.monotonic() + 300
-            while self.resource.state != "archived":
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("Sandbox archive is unconfirmed.")
-                time.sleep(2)
-                self.resource.refresh_data(request_timeout=SDK_TIMEOUT)
-        return "archived"
+        Sandbox.pause(self.id, request_timeout=90)
+        if Sandbox.get_info(self.id, request_timeout=SDK_TIMEOUT).state != "paused":
+            raise RuntimeError("Sandbox pause is unconfirmed.")
+        return "paused"
 
 
 def source_bundle() -> bytes:
@@ -323,10 +218,6 @@ def runner_revision(bundle: bytes | None = None) -> str:
         for name, checksum in sorted(contents):
             digest.update(name.encode() + b"\0" + checksum)
     return digest.hexdigest()
-
-
-def runner_image_name() -> str:
-    return "natsuhat-ready-" + runner_revision()[:16]
 
 
 def import_results(payload: bytes, run_dir: Path) -> None:
@@ -473,20 +364,21 @@ class RemoteRun:
         self.save(phase="Checking prepared runner")
         try:
             manifest = json.loads(self.sandbox.command("cat /opt/natsuhat-runner.json"))
-            ready = manifest.get("revision") == runner_revision()
+            release = re.fullmatch(r"[^:]+:rev-([a-f0-9]{64})", self.job.get("runner_template", ""))
+            ready = bool(release and manifest.get("revision") == release.group(1))
             if ready:
                 self.sandbox.command(
                     f"test -x {self.root}/.venv/bin/python && "
+                    f"test -f {self.root}/natsuhat/interface/viewer/job_runner.py && "
+                    f"test -f {self.root}/natsuhat/interface/viewer/remote_snapshot.py && "
                     "docker image inspect natsuhat-sandbox:local >/dev/null"
                 )
         except Exception:  # noqa: BLE001 - reject stale images before uploading credentials
             ready = False
         if not ready:
             raise JobError(
-                "Runner image is missing, incomplete, or incompatible with this application. "
-                "Build a scan-ready image with "
-                "`uv run --frozen python scripts/runner_images.py "
-                f"{self.job['runner']}` and select it. No per-scan installation is performed."
+                "The sandbox is incomplete or does not match the pinned stable release. "
+                "Verify the published E2B template. No per-scan installation is performed."
             ) from None
 
     def execute(self, *, resume: bool = False) -> int:
@@ -600,7 +492,7 @@ class RemoteRun:
                     time.sleep(2)
                 else:
                     break
-        self.save(phase="Pausing sandbox" if self.job["runner"] == "e2b" else "Archiving sandbox")
+        self.save(phase="Pausing sandbox")
         for _ in range(3):
             try:
                 retained = self.sandbox.retain()
@@ -612,7 +504,7 @@ class RemoteRun:
         self.save(
             cleanup="failed",
             phase="Cleanup failed",
-            error="Sandbox pause/archive unconfirmed. Retry cleanup or check the provider.",
+            error="Sandbox pause unconfirmed. Retry cleanup or check E2B.",
         )
         return False
 

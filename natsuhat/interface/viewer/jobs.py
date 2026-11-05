@@ -50,7 +50,7 @@ def _now() -> str:
 
 
 class ScanJobManager:
-    """One local scan and bounded, independently isolated remote scans."""
+    """Bounded, independently isolated E2B scans."""
 
     def __init__(self, base_dir: Path) -> None:
         if os.name != "posix":
@@ -95,7 +95,7 @@ class ScanJobManager:
                 self._save(job)
         for job in self._jobs.values():
             remote = self._runner_state(job["id"]).get("remote", {})
-            if job.get("runner", "local") != "local" and remote.get("cleanup") not in RETAINED:
+            if job.get("runner") == "e2b" and remote.get("cleanup") not in RETAINED:
                 self._launch(job, cleanup=True)
 
     def _save(self, job: dict[str, Any]) -> None:
@@ -141,6 +141,8 @@ class ScanJobManager:
         return {"remote": json.loads(path.read_text())} if path.exists() else {}
 
     def _resume_error(self, job: dict[str, Any]) -> str | None:  # noqa: PLR0911 - explicit eligibility reasons
+        if job.get("runner") != "e2b":
+            return "This runner is no longer supported. Start a new E2B scan instead."
         if job["status"] not in {"stopped", "interrupted"}:
             return "Only stopped or interrupted scans can be resumed."
         directory = self.base_dir / job["id"]
@@ -167,10 +169,7 @@ class ScanJobManager:
             return "Retry results or sandbox cleanup before resuming this scan."
         return (
             "The retained sandbox is unavailable. Start a new scan instead."
-            if job.get("runner", "local") != "local"
-            and (
-                remote.get("cleanup") not in {"paused", "archived"} or not remote.get("sandbox_id")
-            )
+            if remote.get("cleanup") != "paused" or not remote.get("sandbox_id")
             else None
         )
 
@@ -178,7 +177,7 @@ class ScanJobManager:
         return {
             "runners": runners(),
             "default_runner": self.runner_settings.default(),
-            "max_concurrent": 1 + remote_limit(),
+            "max_concurrent": remote_limit(),
             "max_remote_concurrent": remote_limit(),
             "remote_timeout_seconds": remote_timeout(),
         }
@@ -188,7 +187,7 @@ class ScanJobManager:
         has_source = source is not None or snapshot is not None
         target = "source snapshot" if has_source else body.get("target")
         if not isinstance(target, str) or not target.strip() or len(target) > 4096:
-            raise JobError("Provide a target URL, domain, IP, repository, or local path.")
+            raise JobError("Provide a target URL, domain, IP, or source upload.")
         target = target.strip()
         if target.startswith("-") or any(ord(c) < 32 for c in target):
             raise JobError("Invalid target.")
@@ -218,14 +217,9 @@ class ScanJobManager:
         with self._lock:
             if self._closed:
                 raise JobError("The scan manager is shutting down.", 503)
-            active = [self._jobs[name].get("runner", "local") for name in self._processes]
-            if runner == "local" and "local" in active:
+            if len(self._processes) >= remote_limit():
                 raise JobError(
-                    "A local scan is already active. Stop it or wait for it to finish.", 409
-                )
-            if runner != "local" and sum(item != "local" for item in active) >= remote_limit():
-                raise JobError(
-                    "Remote scan concurrency limit reached. Stop a scan or wait for a slot.", 409
+                    "E2B scan concurrency limit reached. Stop a scan or wait for a slot.", 409
                 )
             llm = self.llm_profiles.selected()
             env = {
@@ -344,7 +338,7 @@ class ScanJobManager:
                     "instruction": instructions.read_text(encoding="utf-8")
                     if instructions.exists()
                     else "",
-                    "runner": job.get("runner", "local"),
+                    "runner": "e2b",
                     "authorized": body.get("authorized"),
                 },
                 snapshot=name if job.get("source") else None,
@@ -361,15 +355,12 @@ class ScanJobManager:
                 raise JobError(reason, 409)
             if self._closed:
                 raise JobError("The scan manager is shutting down.", 503)
-            runner = validate_runner(
+            validate_runner(
                 job.get("runner", "local"),
                 "https://source.invalid" if job.get("source") else job["target"],
             )
-            active = [self._jobs[key].get("runner", "local") for key in self._processes]
-            if runner == "local" and "local" in active:
-                raise JobError("A local scan is already active. Wait for it to finish.", 409)
-            if runner != "local" and sum(item != "local" for item in active) >= remote_limit():
-                raise JobError("Remote scan concurrency limit reached. Wait for a slot.", 409)
+            if len(self._processes) >= remote_limit():
+                raise JobError("E2B scan concurrency limit reached. Wait for a slot.", 409)
             budget = body.get("max_budget_usd", job["max_budget_usd"])
             if (
                 isinstance(budget, bool)
@@ -471,6 +462,10 @@ class ScanJobManager:
             if process is None and (
                 remote.get("cleanup") == "failed" or remote.get("results_pending")
             ):
+                if job.get("runner") != "e2b":
+                    raise JobError(
+                        "This runner is no longer supported. Recover it with its provider."
+                    )
                 self._launch(job, cleanup=True)
                 return dict(job)
             if process is not None and process.poll() is None and job["status"] != "stopping":
