@@ -1,3 +1,12 @@
+{
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 5m
+		}
+	}
+}
+
 {$NATSUHAT_DOMAIN} {
 	header {
 		Strict-Transport-Security "max-age=31536000"

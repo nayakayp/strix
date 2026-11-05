@@ -60,3 +60,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv run --frozen pytest -q
+
+  supabase-contracts:
+    name: Hosted PostgreSQL, Auth, and Storage contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Disposable TLS-enabled PostgreSQL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql
+          sudo systemctl start postgresql
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE natsuhat_test LOGIN CREATEROLE PASSWORD 'disposable-ci-only';
+          CREATE DATABASE natsuhat_test OWNER natsuhat_test;
+          SQL
+      - name: No Supabase project or paid workers
+        env:
+          NATSUHAT_TEST_DATABASE_URL: postgresql://natsuhat_test:disposable-ci-only@127.0.0.1:5432/natsuhat_test?sslmode=require
+        run: uv run --frozen pytest -q tests/test_viewer_supabase.py

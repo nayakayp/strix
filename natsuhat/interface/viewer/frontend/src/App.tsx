@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, AlertCircle, ChevronRight, FileText, Bot } from "lucide-react";
 import type { Vulnerability, VulnerabilitySeverity } from "@/types/issues";
 import { SEVERITY_COLORS } from "@/types/issues";
@@ -26,6 +26,7 @@ import ScanJobsView from "@/components/ScanJobsView";
 import SettingsView from "@/components/SettingsView";
 import { RunDetails } from "@/components/RunDetails";
 import { TrustToast } from "@/components/TrustToast";
+import { HostedContext } from "@/components/HostedGate";
 
 export type View = "pentest" | "overview" | "agents" | "settings";
 
@@ -48,6 +49,7 @@ const SEVERITY_ORDER: VulnerabilitySeverity[] = ["critical", "high", "medium", "
 const POLL_MS = 500;
 
 export default function App() {
+  const hosted = useContext(HostedContext);
   const [activeRun, setActiveRun] = useState<string | null>(() => readPage().run);
   const [run, setRun] = useState<LoadedRun | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -63,6 +65,7 @@ export default function App() {
   // launcher that shares the running scan's coordinator + event loop).
   const [canSteer, setCanSteer] = useState(false);
   const [canManageScans, setCanManageScans] = useState(false);
+  const canManageSettings = hosted ? ["owner", "admin"].includes(hosted.role ?? "") && hosted.aal === "aal2" : canManageScans;
 
   const refreshRuns = useCallback(async () => {
     try {
@@ -220,7 +223,7 @@ export default function App() {
   }, [runs, userSetView]);
 
   async function removeRun(name: string) {
-    if (deleting || !window.confirm("Delete this scan and all its local findings, reports, and logs? This cannot be undone. Retained remote sandboxes will not be deleted.")) return;
+    if (deleting || !window.confirm(hosted ? "Delete this scan, its findings, and its private stored artifacts? This cannot be undone. Retained E2B sandboxes will not be deleted." : "Delete this scan and all its local findings, reports, and logs? This cannot be undone. Retained remote sandboxes will not be deleted.")) return;
     setDeleting(true);
     setDeleteError(null);
     try {
@@ -243,7 +246,8 @@ export default function App() {
           setSelectedId(null);
           userSetView(v);
         }}
-        canManageScans={canManageScans}
+        canManageScans={canManageSettings}
+        hosted={!!hosted}
         mcpConnections={isRunView ? mcpConnections : []}
         mcpInUse={mcpInUse}
       />
@@ -259,7 +263,7 @@ export default function App() {
             <span className="hidden text-sm text-[#888] lg:inline">{view === "settings" ? "Settings" : "Pentest"}{isRunView ? " / Scan details" : creating ? " / New scan" : ""}</span>
             <nav aria-label="Main navigation" className="ml-auto flex flex-wrap items-center gap-4 lg:hidden">
               <TabButton active={view === "pentest" || isRunView} onClick={() => userSetView("pentest")}>Pentest</TabButton>
-              {canManageScans && <TabButton active={view === "settings"} onClick={() => userSetView("settings")}>Settings</TabButton>}
+              {canManageSettings && <TabButton active={view === "settings"} onClick={() => userSetView("settings")}>Settings</TabButton>}
             </nav>
           </div>
         </div>
@@ -278,16 +282,16 @@ export default function App() {
             className="animate-page-in space-y-6"
           >
           {view === "settings" ? (
-            canManageScans ? <SettingsView /> : <p className="text-sm text-[#888]">Settings require an authorized scan-management session.</p>
+            canManageSettings ? <SettingsView /> : <p className="text-sm text-[#888]">Settings require administrator access.</p>
           ) : view === "pentest" ? (
             <div className="space-y-4">
               {deleteError && <p role="alert" className="text-sm text-red-400">{deleteError}</p>}
               {canManageScans ? (
-                <ScanJobsView creating={creating} onCreatingChange={value => { window.location.hash = value ? "page=pentest&action=new" : "page=pentest"; }} onSelectRun={selectRun} onDeleteRun={removeRun} deleting={deleting} />
+                <ScanJobsView creating={creating} onCreatingChange={value => { window.location.hash = value ? "page=pentest&action=new" : "page=pentest"; }} onSelectRun={selectRun} onDeleteRun={removeRun} deleting={deleting} canDelete={!hosted || canManageSettings} />
               ) : (
                 <>
                   <h1 className="text-2xl font-semibold">Pentest</h1>
-                  <p className="text-sm text-[#888]">Browse local scans and their findings.</p>
+                  <p className="text-sm text-[#888]">{hosted ? hosted.role === "viewer" ? "Read-only access to workspace scans and findings." : "Browse workspace scans and findings. Verify MFA in Account & team to enable scan execution." : "Browse local scans and their findings."}</p>
                   <PastRunsView runs={runs} activeRun={activeRun} onSelectRun={selectRun} />
                 </>
               )}
@@ -342,7 +346,7 @@ export default function App() {
           onClose={closeFinding}
         />}
       </div>
-      <TrustToast message={TRUST_BANNER} />
+      <TrustToast message={hosted ? "Workspace records and private scan artifacts are stored in your configured Supabase project." : TRUST_BANNER} />
     </div>
   );
 }

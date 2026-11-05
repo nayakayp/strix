@@ -283,7 +283,16 @@ class RemoteRun:
         remote_dir = f"{self.root}/natsuhat_runs/{self.job['id']}"
         output = "/home/runner/results.tar.gz"
         self.sandbox.command(f"{self.helper} snapshot {remote_dir} {output}")
-        import_results(self.sandbox.download(output), self.run_dir)
+        archive = self.sandbox.download(output)
+        import_results(archive, self.run_dir)
+        if os.environ.get("NATSUHAT_PUBLISH_RESULTS") == "1":
+            # The parent publishes these complete, validated generations. The
+            # worker has no database or bucket credentials, even during retries.
+            pending = self.run_dir / ".cloud-pending"
+            pending.mkdir(mode=0o700, exist_ok=True)
+            temporary = pending / "receiving.tmp"
+            temporary.write_bytes(archive)
+            temporary.replace(pending / f"{time.time_ns():020}.tar.gz")
 
     def resume(self) -> None:
         assert self.sandbox is not None

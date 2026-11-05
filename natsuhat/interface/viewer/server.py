@@ -13,12 +13,14 @@ Design notes:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import mimetypes
 import os
 import secrets
 import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,11 +41,43 @@ from natsuhat.interface.viewer.transcript import (
 
 
 if TYPE_CHECKING:
+    import io
     from collections.abc import Callable
+    from socket import socket
     from typing import BinaryIO
+
+    from natsuhat.interface.viewer.hosted import HostedDashboard
 
 
 logger = logging.getLogger(__name__)
+HOSTED_JSON_TIMEOUT = 30
+HOSTED_UPLOAD_TIMEOUT = 300
+
+
+class _RequestBody:
+    """Bound buffered socket reads by total duration, even when bytes trickle in."""
+
+    def __init__(self, stream: io.BufferedReader, connection: socket, timeout: float) -> None:
+        self.stream = stream
+        self.connection = connection
+        self.deadline = time.monotonic() + timeout
+
+    def read(self, length: int) -> bytes:
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining:
+            wait = self.deadline - time.monotonic()
+            if wait <= 0:
+                raise TimeoutError
+            self.connection.settimeout(wait)
+            # read() can perform many socket reads, resetting an inactivity
+            # timeout each time. read1() returns after at most one raw read.
+            chunk = self.stream.read1(min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
 
 def bundle_dir() -> Path:
@@ -143,6 +177,7 @@ class _ViewerState:
         # Local HTTP viewers keep working without this HTTPS-only setting.
         self.secure_cookies = os.getenv("NATSUHAT_VIEWER_SECURE_COOKIES") == "true"
         self.job_manager: ScanJobManager | None = None
+        self.hosted: HostedDashboard | None = None
 
 
 def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
@@ -150,14 +185,16 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         server_version = "NatsuhatViewer/1.0"
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-            if urlsplit(self.path).path != "/api/github/callback":
+            if state.hosted is None and urlsplit(self.path).path != "/api/github/callback":
                 logger.debug("viewer %s - %s", self.address_string(), format % args)
 
         def do_GET(self) -> None:
             parts = urlsplit(self.path)
             path = parts.path
             try:
-                if path == "/api/github/callback":
+                if state.hosted is not None and path.startswith("/api/"):
+                    self._handle_hosted(path, parse_qs(parts.query))
+                elif path == "/api/github/callback":
                     self._github_callback(parse_qs(parts.query))
                 elif path.startswith("/api/"):
                     self._handle_api(path, parse_qs(parts.query))
@@ -175,7 +212,9 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             try:
-                if path == "/api/jobs" or path.startswith(
+                if state.hosted is not None:
+                    self._handle_hosted(path, {})
+                elif path == "/api/jobs" or path.startswith(
                     (
                         "/api/jobs/",
                         "/api/runs/",
@@ -240,6 +279,9 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
 
         def _handle_api(self, path: str, query: dict[str, list[str]]) -> None:
+            if path == "/api/auth/session":
+                self._send_json(HTTPStatus.OK, {"hosted": False})
+                return
             # Local history needs the session capability, not a cloud email login.
             # Merely reaching an exposed --host port never reveals run entries.
             if path == "/api/runs":
@@ -318,11 +360,81 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
 
-        def _read_mutation_body(self) -> dict[str, Any]:
+        def _handle_hosted(self, path: str, query: dict[str, list[str]]) -> None:
+            hosted = state.hosted
+            assert hosted is not None
+            previous_timeout = self.connection.gettimeout()
+            try:
+                body: dict[str, Any] = {}
+                upload = self.command == "POST" and path == "/api/sources/upload"
+                reader = _RequestBody(
+                    cast("io.BufferedReader", self.rfile),
+                    self.connection,
+                    HOSTED_UPLOAD_TIMEOUT if upload else HOSTED_JSON_TIMEOUT,
+                )
+                if self.command == "POST":
+                    # Compare against configured public origin, not an untrusted Host header.
+                    if (
+                        self.headers.get("Origin") != hosted.store.settings.public_url
+                        or self.headers.get("Sec-Fetch-Site") == "cross-site"
+                    ):
+                        raise JobError("Cross-origin requests are forbidden.", 403)  # noqa: TRY301
+                    if self.headers.get("Transfer-Encoding"):
+                        raise JobError("Provide Content-Length.", 400)  # noqa: TRY301
+                    if upload:
+                        if self.headers.get_content_type() != "application/zip":
+                            raise JobError("Use application/zip.", 415)  # noqa: TRY301
+                    else:
+                        if self.headers.get_content_type() != "application/json":
+                            raise JobError("Use application/json.", 415)  # noqa: TRY301
+                        body = self._read_mutation_body(cast("BinaryIO", reader))
+                # Upload reception must not serialize login, logout or scan
+                # stops. Other mutations retain their existing serialization.
+                with (
+                    hosted.lock
+                    if self.command == "POST" and not upload
+                    else contextlib.nullcontext()
+                ):
+                    status, payload, headers = hosted.dispatch(
+                        self.command,
+                        path,
+                        query,
+                        self._cookies().get("natsuhat_hosted_session", ""),
+                        body,
+                        self.client_address[0],
+                        stream=cast("BinaryIO", reader) if upload else None,
+                        length=int(self.headers.get("Content-Length") or 0),
+                        filename=unquote(self.headers.get("X-Source-Filename", "source.zip")),
+                        workspace_id=self.headers.get("X-Natsuhat-Workspace"),
+                    )
+                # Database timestamps and UUIDs are serialized only at this boundary.
+                self._send_json(
+                    HTTPStatus(status),
+                    json.loads(json.dumps(payload, default=str)),
+                    headers=headers,
+                )
+            except JobError as exc:
+                self._send_json(HTTPStatus(exc.status), {"error": str(exc)})
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid request."})
+            except TimeoutError:
+                self.close_connection = True
+                self.connection.settimeout(30)
+                self._send_json(HTTPStatus.REQUEST_TIMEOUT, {"error": "Request body timed out."})
+            except Exception as exc:  # noqa: BLE001 - SDK/SQL errors may embed credentials
+                logger.error("Hosted request failed (%s)", type(exc).__name__)  # noqa: TRY400 - no secrets
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "Hosted service unavailable. Try again later."},
+                )
+            finally:
+                self.connection.settimeout(previous_timeout)
+
+        def _read_mutation_body(self, stream: BinaryIO | None = None) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length") or 0)
             if not 0 < length <= 32768:
                 raise JobError("Request must contain at most 32 KiB of JSON.", 413)
-            parsed_body = json.loads(self.rfile.read(length))
+            parsed_body = json.loads((stream if stream is not None else self.rfile).read(length))
             if not isinstance(parsed_body, dict):
                 raise JobError("Expected a JSON object.")
             return cast("dict[str, Any]", parsed_body)
@@ -538,7 +650,11 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type or "application/octet-stream")
             self.send_header("Content-Length", str(len(content)))
-            if is_index and self._token_presented(query):
+            if state.hosted is not None:
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+            if is_index and state.hosted is None and self._token_presented(query):
                 # Exchange the bootstrap token for the per-process session
                 # capability. Issued only when the correct token is presented,
                 # so a caller who merely reaches ``/`` never obtains it.
@@ -572,6 +688,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
             for name, value in (headers or {}).items():
                 self.send_header(name, value)
             self.end_headers()
@@ -588,17 +705,21 @@ def authorized_url(base_url: str, token: str) -> str:
     the server. Sharing it (rather than the bare ``base_url``) is what lets a
     trusted remote user authorize when the viewer is exposed with ``--host``.
     """
-    return f"{base_url}/?{urlencode({'token': token})}"
+    return f"{base_url}/?{urlencode({'token': token})}" if token else base_url
 
 
 class _ViewerServer(ThreadingHTTPServer):
     job_manager: ScanJobManager | None = None
+    hosted: HostedDashboard | None = None
 
     def server_close(self) -> None:
         try:
             if self.job_manager is not None:
                 self.job_manager.close()
                 self.job_manager = None
+            if self.hosted is not None:
+                self.hosted.close()
+                self.hosted = None
         finally:
             super().server_close()
 
@@ -611,6 +732,7 @@ def serve(
     open_browser: bool = True,
     steer_handler: Callable[[str, str], bool] | None = None,
     manage_scans: bool = False,
+    hosted: bool = False,
 ) -> tuple[ThreadingHTTPServer, str, str]:
     """Start the viewer server on a background thread; return (server, url, token).
 
@@ -637,7 +759,27 @@ def serve(
         logger.info("viewer port %s unavailable, falling back to an ephemeral port", port)
         httpd = _ViewerServer((host, 0), handler)
 
-    if manage_scans:
+    if hosted:
+        from natsuhat.interface.viewer.hosted import (
+            HostedDashboard,
+        )
+        from natsuhat.interface.viewer.supabase_store import HostedSettings
+
+        try:
+            state.hosted = HostedDashboard(state.base_dir.parent, HostedSettings.from_env())
+            httpd.hosted = state.hosted
+            state.session_token = ""  # nosec B105 - hosted mode uses individual Auth sessions
+        except JobError:
+            httpd.server_close()
+            raise
+        except Exception:  # noqa: BLE001 - never expose connection strings on startup
+            httpd.server_close()
+            raise JobError(
+                "Hosted startup failed. Check database connectivity, runtime roles, "
+                "and migrations.",
+                503,
+            ) from None
+    elif manage_scans:
         try:
             state.job_manager = ScanJobManager(state.base_dir)
             httpd.job_manager = state.job_manager

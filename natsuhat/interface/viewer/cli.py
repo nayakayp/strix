@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def run_view(argv: list[str]) -> None:
+def run_view(argv: list[str]) -> None:  # noqa: PLR0915 - CLI option registration and startup
     parser = argparse.ArgumentParser(
         prog="natsuhat view",
         description="Open a local web view of a Natsuhat run (live or finished).",
@@ -62,7 +62,15 @@ def run_view(argv: list[str]) -> None:
         action="store_true",
         help="Allow the authorized dashboard to start/stop local scans (one at a time).",
     )
+    parser.add_argument(
+        "--hosted",
+        action="store_true",
+        help="Use Supabase Auth, PostgreSQL, and private Storage; "
+        "enables workspace scan management.",
+    )
     args = parser.parse_args(argv)
+    if args.hosted and args.run:
+        parser.error("Hosted mode selects scans by workspace, not a local run argument.")
 
     console = Console()
 
@@ -76,7 +84,7 @@ def run_view(argv: list[str]) -> None:
     # A managing dashboard must also work before the first scan exists.
     run_dir = (
         latest_run_dir() or runs_base_dir() / ".dashboard"
-        if args.manage_scans and not args.run
+        if (args.manage_scans or args.hosted) and not args.run
         else _resolve_run_dir(args.run, console)
     )
 
@@ -87,6 +95,7 @@ def run_view(argv: list[str]) -> None:
             port=args.port,
             open_browser=not args.no_open,
             manage_scans=args.manage_scans,
+            hosted=args.hosted,
         )
     except JobError as exc:
         console.print(str(exc), style="bold red", markup=False)
@@ -108,16 +117,25 @@ def run_view(argv: list[str]) -> None:
 
     state_label = _state_label(summary)
     console.print()
-    if not run_record_path(run_dir).is_file():
+    if args.hosted:
+        console.print("Serving the Supabase dashboard (individual sign-in required) at:")
+    elif not run_record_path(run_dir).is_file():
         console.print("Serving the local scan dashboard at:")
     else:
         console.print(f"Serving [bold white]{run_name}[/] ({state_label}) at:")
     # Print the URL alone on its own line with soft_wrap so Rich never inserts a
     # wrap into the (long, tokened) link -- that keeps it selectable/copyable.
     console.print(f"  [#60a5fa]{open_url}[/]", soft_wrap=True)
-    console.print("[dim]This link authorizes the browser; anyone you share it with can steer[/]")
-    console.print("[dim]a live scan and browse history. Press Ctrl-C to stop the viewer.[/]")
-    if args.manage_scans:
+    if not args.hosted:
+        console.print(
+            "[dim]This link authorizes the browser; anyone you share it with can steer[/]"
+        )
+        console.print("[dim]a live scan and browse history. Press Ctrl-C to stop the viewer.[/]")
+    else:
+        console.print(
+            "[dim]Workspace roles and MFA protect scan management. Press Ctrl-C to stop.[/]"
+        )
+    if args.manage_scans or args.hosted:
         console.print("[yellow]Scan management enabled: this link can launch paid local scans.[/]")
         console.print("[dim]Stopping this viewer also stops its active scan.[/]")
     console.print()

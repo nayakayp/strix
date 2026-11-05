@@ -4,9 +4,11 @@ Self-hosted AI penetration testing for applications, APIs, and source code.
 Natsuhat coordinates security agents, runs tools in a Docker sandbox, and writes
 findings with reproduction steps and remediation guidance.
 
-**Local-only:** no hosted account, cloud sign-up, billing integration, email relay,
-or upstream usage analytics. Scan artifacts stay on your machine. Configured LLM,
-search, and MCP providers still receive the data needed for their requests.
+**Local by default:** no hosted account or cloud sign-up is required. Scan
+artifacts stay on your machine. Configured LLM, search, and MCP providers still
+receive the data needed for their requests. An explicitly enabled
+[Supabase dashboard](docs/supabase.md) adds individual sign-in, workspace roles,
+PostgreSQL records, and private Storage in your own Supabase project.
 
 ## Run from source
 

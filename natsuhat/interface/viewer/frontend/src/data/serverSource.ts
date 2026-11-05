@@ -82,8 +82,20 @@ export interface LoadedRun {
   transcript: Transcript;
 }
 
+// Tab-local context, updated only when HostedGate displays a new session.
+// Another tab's session-cookie workspace selection must not retarget requests.
+let hostedWorkspace: string | undefined;
+
+export function setHostedWorkspace(workspace: string | undefined) {
+  hostedWorkspace = workspace;
+}
+
+export function workspaceHeaders(): Record<string, string> {
+  return hostedWorkspace ? { "X-Natsuhat-Workspace": hostedWorkspace } : {};
+}
+
 async function getJson(path: string): Promise<unknown> {
-  const res = await fetch(path, { cache: "no-store" });
+  const res = await fetch(path, { cache: "no-store", headers: workspaceHeaders() });
   if (!res.ok) throw new Error(`${path} responded ${res.status}`);
   return res.json();
 }
@@ -186,7 +198,7 @@ export type SteerResult = { ok: true } | { ok: false; error: string };
 async function postJson(path: string, body: Record<string, unknown>) {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...workspaceHeaders() },
     body: JSON.stringify(body),
   });
   let data: Record<string, unknown> = {};
@@ -347,6 +359,7 @@ export function uploadSource(file: File, progress: (value: number) => void, sign
     request.open("POST", "/api/sources/upload");
     request.setRequestHeader("Content-Type", "application/zip");
     request.setRequestHeader("X-Source-Filename", encodeURIComponent(file.name));
+    for (const [name, value] of Object.entries(workspaceHeaders())) request.setRequestHeader(name, value);
     request.responseType = "json";
     request.upload.onprogress = event => { if (event.lengthComputable) progress(Math.round(event.loaded / event.total * 100)); };
     const abort = () => request.abort();

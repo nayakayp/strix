@@ -106,7 +106,7 @@ export default function PastRunsView({
   if (runs.runs.length === 0) {
     return (
       <div className="rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-8 text-center text-sm text-[#888]">
-        No past runs found in this viewer’s runs directory yet.
+        No past runs found yet.
       </div>
     );
   }

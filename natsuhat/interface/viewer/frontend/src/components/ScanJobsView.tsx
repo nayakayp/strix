@@ -63,12 +63,13 @@ function ScanFailure({ job }: { job: ScanJob }) {
   </div>;
 }
 
-export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, onDeleteRun, deleting }: {
+export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, onDeleteRun, deleting, canDelete = true }: {
   creating: boolean;
   onCreatingChange: (value: boolean) => void;
   onSelectRun: (name: string) => void;
   onDeleteRun: (name: string) => Promise<void>;
   deleting: boolean;
+  canDelete?: boolean;
 }) {
   const [jobs, setJobs] = useState<ScanJob[] | null>(null);
   const [target, setTarget] = useState("");
@@ -270,7 +271,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">Pentest</h1>
-          <p className="mt-1 text-sm text-[#888]">Create scans, review findings, and manage local scan history.</p>
+          <p className="mt-1 text-sm text-[#888]">Create scans, review findings, and manage scan history.</p>
         </div>
         <button id="new-scan-trigger" disabled={pending} className={`${buttonClass} inline-flex items-center gap-2 bg-white !text-black hover:bg-[#ddd]`} onClick={() => { onCreatingChange(true); setAuthorized(false); setSource(null); }}><Plus className="h-4 w-4" aria-hidden="true" />New scan</button>
       </div>
@@ -296,7 +297,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
                 {job.can_resume && <ScanAction label="Resume scan" disabled={pending || active} aria-expanded={resumeId === job.id} aria-controls={`resume-${job.id}`} onClick={() => { setResumeId(resumeId === job.id ? null : job.id); setResumeAuthorized(false); setResumeBudget(String(job.max_budget_usd)); setRerunId(null); setError(null); }}><Play className="h-4 w-4" aria-hidden="true" /></ScanAction>}
                 {job.status === "failed" && job.remote?.cleanup !== "failed" && !job.remote?.results_pending && <ScanAction label="Rerun scan" disabled={pending || active} aria-expanded={rerunId === job.id} aria-controls={`rerun-${job.id}`} onClick={() => { setRerunId(rerunId === job.id ? null : job.id); setRerunAuthorized(false); setResumeId(null); setError(null); }}><RotateCcw className="h-4 w-4" aria-hidden="true" /></ScanAction>}
                 {ACTIVE.has(job.status) && <ScanAction label={job.status === "stopping" ? "Stopping scan…" : "Stop scan"} className="!text-red-400" disabled={pending || job.status === "stopping"} onClick={() => void stop(job.id)}><Square className="h-4 w-4" aria-hidden="true" /></ScanAction>}
-                <ScanAction label="Delete scan" className="!text-red-400" disabled={pending || deleting || ACTIVE.has(job.status) || !!job.remote?.results_pending || (!!job.remote && !["paused", "archived", "deleted", "not_created"].includes(job.remote.cleanup))} onClick={() => void onDeleteRun(job.id)}><Trash2 className="h-4 w-4" aria-hidden="true" /></ScanAction>
+                {canDelete && <ScanAction label="Delete scan" className="!text-red-400" disabled={pending || deleting || ACTIVE.has(job.status) || !!job.remote?.results_pending || (!!job.remote && !["paused", "archived", "deleted", "not_created"].includes(job.remote.cleanup))} onClick={() => void onDeleteRun(job.id)}><Trash2 className="h-4 w-4" aria-hidden="true" /></ScanAction>}
               </div>
             </div>
             {job.status === "failed" ? <ScanFailure job={job} /> : job.error && <p role="alert" className="pointer-events-none mt-3 text-xs text-red-400">{job.error}</p>}

@@ -1,0 +1,15 @@
+# Opt-in: docker compose -f deploy/compose.yaml -f deploy/compose.supabase.yaml up -d --build
+services:
+  dashboard:
+    command: ["natsuhat", "view", "--hosted", "--no-open", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      NATSUHAT_PUBLIC_URL: ${NATSUHAT_PUBLIC_URL:?Set the exact HTTPS dashboard origin}
+      SUPABASE_URL: ${SUPABASE_URL:?Set the Supabase project URL}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:?Set the publishable key}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:?Set the backend secret key}
+      DATABASE_URL: ${DATABASE_URL:?Set a restricted PostgreSQL runtime connection URL}
+      SUPABASE_S3_ENDPOINT: ${SUPABASE_S3_ENDPOINT:?Set the Supabase S3 endpoint}
+      SUPABASE_S3_REGION: ${SUPABASE_S3_REGION:?Set the S3 region}
+      SUPABASE_S3_ACCESS_KEY_ID: ${SUPABASE_S3_ACCESS_KEY_ID:?Set the S3 access key}
+      SUPABASE_S3_SECRET_ACCESS_KEY: ${SUPABASE_S3_SECRET_ACCESS_KEY:?Set the S3 secret key}
+      NATSUHAT_SESSION_ENCRYPTION_KEY: ${NATSUHAT_SESSION_ENCRYPTION_KEY:?Set a stable random session encryption key}

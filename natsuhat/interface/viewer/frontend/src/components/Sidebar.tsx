@@ -24,6 +24,7 @@ interface SidebarProps {
   view: View;
   onSelectView: (view: View) => void;
   canManageScans: boolean;
+  hosted?: boolean;
   mcpConnections: McpConnectionStatus[];
   mcpInUse: Set<string>;
 }
@@ -42,6 +43,7 @@ export default function Sidebar({
   view,
   onSelectView,
   canManageScans,
+  hosted = false,
   mcpConnections,
   mcpInUse,
 }: SidebarProps) {
@@ -138,7 +140,7 @@ export default function Sidebar({
         <header className="flex items-center gap-2 px-4 py-5 min-w-[160px]">
           <img src="./logo.png" alt="" className="h-7 w-7" />
           <span className="text-[14px] font-medium text-[#ededed]">Natsuhat</span>
-          <span className="text-[11px] text-[#888]">Local</span>
+          <span className="text-[11px] text-[#888]">{hosted ? "Workspace" : "Local"}</span>
         </header>
 
         {/* Navigation */}
@@ -164,7 +166,7 @@ export default function Sidebar({
           </div>
         </nav>
 
-        <div className="px-4 py-4 text-xs text-[#666]">Local viewer · No account required</div>
+        <div className="px-4 py-4 text-xs text-[#666]">{hosted ? "Private workspace · Supabase" : "Local viewer · No account required"}</div>
 
         {/* Resize handle */}
         <div

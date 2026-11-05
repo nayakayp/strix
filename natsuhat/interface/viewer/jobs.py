@@ -37,6 +37,7 @@ from natsuhat.report.writer import atomic_write_text
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -52,7 +53,9 @@ def _now() -> str:
 class ScanJobManager:
     """Bounded, independently isolated E2B scans."""
 
-    def __init__(self, base_dir: Path) -> None:
+    def __init__(
+        self, base_dir: Path, *, on_save: Callable[[dict[str, Any]], None] | None = None
+    ) -> None:
         if os.name != "posix":
             raise JobError("Local scan management currently requires Linux or macOS.")
         if getattr(sys, "frozen", False):
@@ -77,11 +80,13 @@ class ScanJobManager:
         except BaseException:
             self._owner.close()
             raise
-        self._lock = threading.RLock()
+        # Hosted publication/restore share this lock with job lifecycle changes.
+        self.lock = threading.RLock()
         self._closed = False
         self._jobs: dict[str, dict[str, Any]] = {}
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._watchers: list[threading.Thread] = []
+        self.on_save = on_save
         for path in self.base_dir.glob("*/job.json"):
             job = json.loads(path.read_text(encoding="utf-8"))
             if job.get("id") != path.parent.name:
@@ -103,6 +108,8 @@ class ScanJobManager:
         atomic_write_text(run_dir / "job.json", json.dumps(job, indent=2))
         # The CLI owns run.json while alive; finalize only after it has exited.
         if job["status"] in ACTIVE_STATUSES:
+            if self.on_save:
+                self.on_save(job)
             return
         record_path = run_dir / "run.json"
         record = (
@@ -119,9 +126,11 @@ class ScanJobManager:
         if record.get("status") != "completed":
             record.update(status=job["status"], end_time=job["end_time"])
         atomic_write_text(record_path, json.dumps(record, indent=2))
+        if self.on_save:
+            self.on_save(job)
 
     def list(self) -> list[dict[str, Any]]:
-        with self._lock:
+        with self.lock:
             result: list[dict[str, Any]] = []
             for job in sorted(self._jobs.values(), key=lambda j: j["start_time"], reverse=True):
                 reason = self._resume_error(job)
@@ -135,6 +144,14 @@ class ScanJobManager:
                     }
                 )
             return result
+
+    def load_restored_job(self, name: str) -> None:
+        """Register a durable job after its files have been restored by the host."""
+        with self.lock:
+            job = json.loads((self.base_dir / name / "job.json").read_text())
+            if job["id"] != name:
+                raise JobError("Stored job identity does not match its directory.")
+            self._jobs[name] = job
 
     def _runner_state(self, name: str) -> dict[str, Any]:
         path = self.base_dir / name / "runner.json"
@@ -182,7 +199,9 @@ class ScanJobManager:
             "remote_timeout_seconds": remote_timeout(),
         }
 
-    def start(self, body: dict[str, Any], *, snapshot: str | None = None) -> dict[str, Any]:
+    def start(  # noqa: PLR0912 - validate and persist before launching the paid worker
+        self, body: dict[str, Any], *, snapshot: str | None = None, created_by: str | None = None
+    ) -> dict[str, Any]:
         source = body.get("source")
         has_source = source is not None or snapshot is not None
         target = "source snapshot" if has_source else body.get("target")
@@ -214,7 +233,7 @@ class ScanJobManager:
         template = self.runner_settings.preflight(runner)
         if source is not None:
             snapshot = self._prepare_source(source)
-        with self._lock:
+        with self.lock:
             if self._closed:
                 raise JobError("The scan manager is shutting down.", 503)
             if len(self._processes) >= remote_limit():
@@ -250,13 +269,22 @@ class ScanJobManager:
                 "error": None,
                 "llm_model": llm["model"] if llm is not None else None,
                 "runner": runner,
+                **({"created_by": created_by} if created_by else {}),
                 **({"runner_template": template} if template else {}),
                 **({"source": metadata} if metadata else {}),
             }
             self._jobs[name] = job
-            self._save(job)
             if instruction.strip():
                 (run_dir / "instructions.txt").write_text(instruction, encoding="utf-8")
+            try:
+                self._save(job)
+            except Exception:
+                # Persistence failed before launch: do not spend provider credits.
+                self._jobs.pop(name, None)
+                shutil.rmtree(run_dir)
+                if metadata:
+                    self.sources.remove(name)
+                raise
             self._launch(job, env=env)
             return dict(job)
 
@@ -289,6 +317,15 @@ class ScanJobManager:
             job["cleanup_only"] = True
         elif resume:
             command.append("--resume")
+        if self.on_save is not None:
+            env = dict(os.environ if env is None else env)
+            for key in list(env):
+                if key.startswith("SUPABASE_") or key in {
+                    "DATABASE_URL",
+                    "NATSUHAT_SESSION_ENCRYPTION_KEY",
+                }:
+                    env.pop(key)
+            env["NATSUHAT_PUBLISH_RESULTS"] = "1"
         try:
             with (run_dir / "job.log").open("ab" if cleanup or resume else "wb") as log:
                 process = subprocess.Popen(  # noqa: S603 - fixed Python module, no shell
@@ -316,7 +353,7 @@ class ScanJobManager:
     def rerun(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         if body.get("authorized") is not True:
             raise JobError("Confirm that you are authorized to test this target.")
-        with self._lock:
+        with self.lock:
             job = self._jobs.get(name)
             if job is None:
                 raise JobError("Unknown local scan job.", 404)
@@ -347,7 +384,7 @@ class ScanJobManager:
     def resume(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         if body.get("authorized") is not True:
             raise JobError("Confirm that you are authorized to resume testing this target.")
-        with self._lock:
+        with self.lock:
             job = self._jobs.get(name)
             if job is None:
                 raise JobError("Unknown local scan job.", 404)
@@ -399,7 +436,7 @@ class ScanJobManager:
 
     def _wait(self, name: str, process: subprocess.Popen[bytes]) -> None:
         code = process.wait()
-        with self._lock:
+        with self.lock:
             job = self._jobs[name]
             record_path = self.base_dir / name / "run.json"
             record: dict[str, Any] = (
@@ -453,7 +490,7 @@ class ScanJobManager:
                 self._processes.pop(name, None)
 
     def stop(self, name: str) -> dict[str, Any]:
-        with self._lock:
+        with self.lock:
             job = self._jobs.get(name)
             if job is None:
                 raise JobError("Unknown local scan job.", 404)
@@ -487,9 +524,9 @@ class ScanJobManager:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
 
-    def delete(self, name: str) -> None:
+    def delete(self, name: str, *, before_remove: Callable[[], None] | None = None) -> None:
         """Remove terminal local results, never a retained provider sandbox."""
-        with self._lock:
+        with self.lock:
             directory = self.base_dir / name
             if (
                 not name
@@ -509,13 +546,15 @@ class ScanJobManager:
             remote = self._runner_state(name).get("remote", {})
             if remote and (remote.get("cleanup") not in RETAINED or remote.get("results_pending")):
                 raise JobError("Retrieve results and finish sandbox cleanup before deleting.", 409)
+            if before_remove:
+                before_remove()
             shutil.rmtree(directory)
             if job and job.get("source"):
                 self.sources.remove(name)
             self._jobs.pop(name, None)
 
     def log(self, name: str) -> str:
-        with self._lock:
+        with self.lock:
             if name not in self._jobs:
                 raise JobError("Unknown local scan job.", 404)
         directory = self.base_dir / name
@@ -528,7 +567,7 @@ class ScanJobManager:
         return output
 
     def close(self) -> None:
-        with self._lock:
+        with self.lock:
             self._closed = True
             for name in list(self._processes):
                 self.stop(name)

@@ -13,6 +13,13 @@ natsuhat view --host 0.0.0.0 --port 8080 --no-open
 
 The UI ships prebuilt with Natsuhat, so there is no extra install and no JavaScript build step. Reading saved runs does not upload them, and you do not need a hosted account. Launching scans uses your configured LLM provider. There is no remote report-email or feedback service.
 
+For a multi-user hosted dashboard, `natsuhat view --hosted` explicitly enables
+Supabase Auth, workspace roles, PostgreSQL, and private Storage. See the
+[Supabase setup guide](https://github.com/nayakayp/strix/blob/main/docs/supabase.md)
+for migrations, runtime credentials, email templates, and deployment. It uses
+individual sign-in instead of the local viewer's shared link; it does not
+automatically import or upload local runs.
+
 ## Options
 
 <ParamField path="run" type="string">
