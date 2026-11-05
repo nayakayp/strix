@@ -32,8 +32,8 @@ One VPS remains a single point of failure even with those changes.
 
 ## 1. Prepare the VPS
 
-Install Docker Engine, Compose v2, and Komodo Core/Periphery using the official
-[MongoDB setup](https://komo.do/docs/setup/mongo). Komodo recommends MongoDB; its
+Install Docker Engine, Compose v2.24.4 or newer, and Komodo Core/Periphery using
+the official [MongoDB setup](https://komo.do/docs/setup/mongo). Komodo recommends MongoDB; its
 database, Docker images, and logs also consume memory and disk. No measured
 Komodo-versus-Coolify resource comparison is claimed here.
 
@@ -46,16 +46,26 @@ the idle dashboard. No minimum VPS size or scan benchmark is claimed here.
 - Use a dedicated, trusted-operator VPS, not a multi-tenant server. Dashboard
   authorization permits paid scans and access to uploaded source and results.
   The dashboard runs as UID/GID 10001 without root or host Docker socket access.
-- Keep Komodo administration and Periphery behind a VPN/firewall. Expose only the
-  authenticated API needed by GitHub runners through HTTPS (or use a private
-  runner/network). Never publish Docker or Periphery APIs unprotected.
+- Serve Komodo administration and its authenticated API over HTTPS. Use strong
+  operator authentication and a least-privilege service user for CI. Keep Docker
+  and Periphery APIs private; public dashboard access does not require exposing them.
 - Point `your-dashboard.example` at the VPS. The included Caddy service needs
   ports 80 and 443 available for automatic HTTPS; do not run a second proxy on
   those ports. If you already have a proxy, remove this stack's proxy service and
   route your existing proxy to the dashboard instead.
-- Protect dashboard access with a VPN or IP allowlist as well as its private
-  capability token. E2B sandboxes have network egress and receive the scan inputs
-  and selected LLM credentials; only submit systems you are authorized to test.
+- Dashboard access is not restricted by source IP. Authorization relies on its
+  private capability token over HTTPS, not merely on reaching the website.
+  A VPN or IP allowlist is optional defense in depth, not a deployment requirement.
+  E2B sandboxes have network egress and receive the scan inputs and selected LLM
+  credentials; only submit systems you are authorized to test.
+
+The dashboard drops all Linux capabilities, prevents privilege escalation, and
+limits its controller to 1 CPU, 2 GiB RAM, and 256 processes. These are starting
+limits, not a scan-load benchmark; monitor controller usage before increasing
+concurrency. Image builds are not constrained by these runtime limits. HTTPS
+deployments set `NATSUHAT_VIEWER_SECURE_COOKIES=true` for both dashboard and GitHub
+flow cookies; ordinary local HTTP viewers leave it unset. The proxy also sets
+HSTS, no-referrer, nosniff, and anti-framing headers.
 
 Create the persistent state directory on the VPS with the image user's ownership:
 
@@ -81,8 +91,24 @@ Use the [Git repository source](https://komo.do/docs/deploy/compose):
 | Run directory | Repository root (`.` relative to the cloned repository) |
 | Compose files | `deploy/compose.yaml` |
 | Project name | `natsuhat` (keep stable across releases) |
+| Run build | Enabled |
 | Extra args for Compose up | `--build --wait --wait-timeout 120` (rebuild, then wait for readiness) |
 | Auto update / direct push webhook | Disabled; CI requests deployment |
+
+For an existing Komodo Caddy proxy on `komodo_default`, use Compose files
+`deploy/compose.yaml` then `deploy/compose.komodo.yaml`. This tracked override
+removes the bundled proxy and exposes only the internal `natsuhat-dashboard:8080`
+network alias. Do not reference `/etc/komodo/overrides/natsuhat.compose.yaml`:
+an untracked host-only override may be invisible to Core or lost during recovery.
+Publish the tracked override to the release branch **before** switching the
+Stack's file paths; confirm Komodo reports no missing files. Apply the HTTPS
+headers to the **existing proxy**, since the removed service cannot set them.
+Both dashboards can remain publicly reachable, but sensitive application and
+Komodo API operations must still require authentication.
+
+If using a linked Komodo Repo, set **that Repo's** branch to `production`, clear
+its commit pin, and disable its webhook too. The Stack's own branch field does
+not override the linked Repo's source. Do not switch before `production` exists.
 
 Keep the repository files available: Compose builds from the repository root and
 mounts `deploy/Caddyfile`. Do not paste just the Compose text into an empty stack.
@@ -121,22 +147,33 @@ The `production` branch prevents Komodo from building an untested newer tip of
 PR runs, failed CI, manual CI runs, and superseded main commits do not deploy.
 Do not push untested code directly to `production`.
 
-1. Create GitHub environment `production`. Optionally require idle-scan approval.
+1. Protect `main`: require pull requests, the `ci-passed` status check, and no
+   force pushes or deletions. Confirm Actions are enabled and a main commit
+   passes CI before creating `production` from that exact SHA. Leave
+   `VPS_AUTO_DEPLOY` disabled during this bootstrap.
+2. Create GitHub environment `production`. Optionally require idle-scan approval.
    Environment branch policies must allow `main`, where CI runs.
-2. Allow the deploy job's `GITHUB_TOKEN` to update `production`. Branch protections
+3. Allow the deploy job's `GITHUB_TOKEN` to update `production`. Branch protections
    must permit its fast-forward update; retain main protections and prohibit
    force-pushes. If your policy prohibits this, leave automation disabled and
    promote reviewed commits manually.
-3. Create a Komodo service user with read and execution access only to this Stack.
+4. Create a Komodo service user with read and execution access only to this Stack.
+   A linked Repo also needs read access for the source validation; no Repo write
+   or execution access is required. Do not use your Komodo administrator key.
    Create its API key/secret. In GitHub's `production` environment, configure secrets:
    `KOMODO_ADDRESS` (HTTPS base URL), `KOMODO_API_KEY`, `KOMODO_API_SECRET`.
-4. Set repository Actions variable `KOMODO_STACK` to the Stack ID or name, and
+5. Set repository Actions variable `KOMODO_STACK` to the Stack ID or name, and
    `VPS_AUTO_DEPLOY` to `true`.
-5. Push to main. Inspect **CI → Deploy VPS**, then the Stack's updates in Komodo.
+6. Push to main. Inspect **CI → Deploy VPS**, then the Stack's updates in Komodo.
 
 The job executes no repository code with its write token. It waits for all Stack
-actions to become idle using `POST /read/GetStackActionState`, then rechecks main,
-promotes the tested commit, and calls `POST /execute/DeployStack` exactly once.
+actions to become idle using `POST /read/GetStackActionState`, then verifies the
+Stack uses Git source, disables direct webhooks/auto-update, builds and waits for
+health, and has no missing files. It checks that the effective source (including
+a linked Repo) is this repository on `github.com` over HTTPS, using the
+`production` branch without a commit pin or webhook. Unsafe configuration fails
+before release promotion. It then rechecks main, promotes the tested commit,
+and calls `POST /execute/DeployStack` exactly once.
 It keeps its GitHub concurrency lock while polling the returned Update ID with
 `POST /read/GetUpdate`. The job succeeds only on `status: Complete` and
 `success: true`; an accepted request alone is not success. The Stack's Compose

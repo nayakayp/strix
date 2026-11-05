@@ -24,10 +24,18 @@ services:
       dockerfile: containers/dashboard/Dockerfile
     restart: unless-stopped
     init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1.0
+    mem_limit: 2g
+    pids_limit: 256
     stop_grace_period: 20m
     expose:
       - "8080"
     environment:
+      NATSUHAT_VIEWER_SECURE_COOKIES: "true"
       E2B_API_KEY: ${E2B_API_KEY:?Set the E2B API key for dashboard scans}
       NATSUHAT_LLM: ${NATSUHAT_LLM:-openai/gpt-5.4}
       LLM_API_KEY: ${LLM_API_KEY:-}

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import secrets
 import threading
 import webbrowser
@@ -138,6 +139,9 @@ class _ViewerState:
         # Finalized in ``serve()`` once the port is known (the server binds
         # after this state is constructed); see SESSION_COOKIE_PREFIX.
         self.cookie_name = SESSION_COOKIE_PREFIX
+        # Deployment-controlled: never trust a client-supplied forwarded header.
+        # Local HTTP viewers keep working without this HTTPS-only setting.
+        self.secure_cookies = os.getenv("NATSUHAT_VIEWER_SECURE_COOKIES") == "true"
         self.job_manager: ScanJobManager | None = None
 
 
@@ -365,6 +369,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                         {
                             "Set-Cookie": f"{state.cookie_name}_github={flow}; "
                             "Path=/api/github; HttpOnly; SameSite=Lax; Max-Age=600"
+                            + ("; Secure" if state.secure_cookies else "")
                         }
                         if flow
                         else None
@@ -541,7 +546,8 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 # SameSite=Strict (never sent from a cross-site context).
                 self.send_header(
                     "Set-Cookie",
-                    f"{state.cookie_name}={state.session_token}; Path=/; HttpOnly; SameSite=Strict",
+                    f"{state.cookie_name}={state.session_token}; Path=/; HttpOnly; SameSite=Strict"
+                    + ("; Secure" if state.secure_cookies else ""),
                 )
             self.end_headers()
             self.wfile.write(content)

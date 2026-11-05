@@ -1,0 +1,20 @@
+# Merge after deploy/compose.yaml when reusing the existing Komodo Caddy proxy.
+# Apply the dashboard HTTPS headers to that proxy separately.
+services:
+  proxy: !reset null
+  dashboard:
+    networks:
+      komodo:
+        aliases:
+          - natsuhat-dashboard
+    environment:
+      NATSUHAT_GITHUB_APP_ID: ${NATSUHAT_GITHUB_APP_ID:-}
+      NATSUHAT_GITHUB_CALLBACK_URL: ${NATSUHAT_GITHUB_CALLBACK_URL:-}
+      NATSUHAT_GITHUB_CLIENT_ID: ${NATSUHAT_GITHUB_CLIENT_ID:-}
+      NATSUHAT_GITHUB_CLIENT_SECRET: ${NATSUHAT_GITHUB_CLIENT_SECRET:-}
+      NATSUHAT_GITHUB_PRIVATE_KEY_PATH: ${NATSUHAT_GITHUB_PRIVATE_KEY_PATH:-}
+networks:
+  komodo:
+    external: true
+    name: komodo_default
+volumes: !reset {}

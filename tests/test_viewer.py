@@ -10,6 +10,8 @@ import urllib.request
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+import pytest
+
 from natsuhat.core.paths import latest_run_dir, runs_base_dir
 from natsuhat.interface.viewer.cli import _state_label, run_view
 from natsuhat.interface.viewer.server import serve
@@ -24,8 +26,6 @@ from natsuhat.interface.viewer.transcript import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
-
-    import pytest
 
 
 def _make_run(base: Path, name: str, *, status: str, end_time: str | None) -> Path:
@@ -388,9 +388,11 @@ def _bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("natsuhat.interface.viewer.server.bundle_dir", lambda: assets)
 
 
+@pytest.mark.parametrize("secure_cookies", [False, True])
 def test_capability_issued_only_for_tokened_bootstrap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secure_cookies: bool
 ) -> None:
+    monkeypatch.setenv("NATSUHAT_VIEWER_SECURE_COOKIES", str(secure_cookies).lower())
     run_dir = _make_run(tmp_path, "cookie", status="running", end_time=None)
     assets = tmp_path / "bundle"
     (assets / "assets").mkdir(parents=True)
@@ -413,6 +415,7 @@ def test_capability_issued_only_for_tokened_bootstrap(
             cookie = str(resp.headers.get("Set-Cookie", ""))
         assert f"{_cookie_name(url)}=" in cookie
         assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
+        assert ("; Secure" in cookie) is secure_cookies
 
         # Static assets never carry it.
         with urllib.request.urlopen(url + "/assets/app.js") as resp:  # noqa: S310  # nosec B310

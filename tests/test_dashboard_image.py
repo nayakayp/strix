@@ -47,6 +47,13 @@ def test_dashboard_image_auth_health_and_persistence() -> None:
                 container,
                 "--network",
                 "none",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges:true",
+                "--cpus=1",
+                "--memory=2g",
+                "--pids-limit=256",
+                "--env",
+                "NATSUHAT_VIEWER_SECURE_COOKIES=true",
                 "--env",
                 "E2B_API_KEY=synthetic-e2b-key",
                 "--mount",
@@ -96,6 +103,7 @@ for cookie in ['', 'natsuhat_viewer_session_8080=' + {previous_token!r}]:
 
 with get('/?token=' + {token!r}) as response:
     assert b'<html' in response.read()
+    assert '; Secure' in response.headers['Set-Cookie']
     cookie = response.headers['Set-Cookie'].split(';')[0]
 with get('/api/capabilities', cookie) as response:
     assert json.load(response)['can_manage_scans'] is True

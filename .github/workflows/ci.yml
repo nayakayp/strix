@@ -110,6 +110,32 @@ jobs:
             fi
             wait_for_poll
           done
+          # Refuse configuration drift before promoting a release or executing it.
+          definition=$(komodo read/GetStack "$stack")
+          jq -e '
+            .config.webhook_enabled == false and .config.auto_update == false and
+            .config.files_on_host == false and .config.file_contents == "" and
+            .config.run_build == true and
+            (.config.extra_args | index("--wait") != null) and
+            .info.missing_files == []
+          ' <<< "$definition" > /dev/null || {
+            echo 'Unsafe Stack configuration: disable webhooks/auto-update, use Git source, resolve missing files, and enable build/health waiting.' >&2
+            exit 1
+          }
+          source=$(jq -c '.config' <<< "$definition")
+          linked_repo=$(jq -r '.linked_repo' <<< "$source")
+          if [ -n "$linked_repo" ]; then
+            source=$(komodo read/GetRepo "$(jq -nc --arg repo "$linked_repo" '{repo: $repo}')")
+            source=$(jq -c '.config' <<< "$source")
+          fi
+          jq -e --arg repo "$GH_REPO" '
+            .git_provider == "github.com" and .git_https == true and
+            .repo == $repo and .branch == "production" and .commit == "" and
+            .webhook_enabled == false
+          ' <<< "$source" > /dev/null || {
+            echo 'Komodo must source this GitHub repository over HTTPS from production, without a pinned commit or direct webhooks.' >&2
+            exit 1
+          }
           # Wait before moving the release branch, so an older deployment can
           # finish checking out/building its own release without this job racing it.
           latest=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)

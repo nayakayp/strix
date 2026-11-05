@@ -389,9 +389,11 @@ def test_github_callback_rejects_other_sessions_replays_and_unowned_installation
 
 
 @pytest.mark.usefixtures("github_app")
+@pytest.mark.parametrize("secure_cookies", [False, True])
 def test_github_http_callback_uses_lax_flow_without_weakening_dashboard_session(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secure_cookies: bool
 ) -> None:
+    monkeypatch.setenv("NATSUHAT_VIEWER_SECURE_COOKIES", str(secure_cookies).lower())
     httpd, url, token = serve(
         tmp_path / "natsuhat_runs" / ".dashboard", manage_scans=True, open_browser=False
     )
@@ -415,9 +417,11 @@ def test_github_http_callback_uses_lax_flow_without_weakening_dashboard_session(
         assert call("/api/github/callback?state=forged")[0] == 403
         bootstrap = call("/?" + urlencode({"token": token}))
         assert "SameSite=Strict" in bootstrap[1]["Set-Cookie"]
+        assert ("; Secure" in bootstrap[1]["Set-Cookie"]) is secure_cookies
         begin = call("/api/github/connect", cookie=f"{cookie_name}={token}", body="{}")
         assert begin[0] == 200
         assert "SameSite=Lax" in begin[1]["Set-Cookie"]
+        assert ("; Secure" in begin[1]["Set-Cookie"]) is secure_cookies
         flow = begin[1]["Set-Cookie"].split(";", 1)[0]
         state = parse_qs(urlsplit(json.loads(begin[2])["url"]).query)["state"][0]
         installation = call(

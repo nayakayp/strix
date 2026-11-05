@@ -42,6 +42,44 @@ elif command == 'curl':
         state['idle'] = state.get('observed_busy', False)
         state['observed_busy'] = True
         print(json.dumps({'pulling': not state['idle'], 'deploying': False}))
+    elif endpoint in ('read/GetStack', 'read/GetRepo'):
+        config = {
+            'repo': 'fixture/repository',
+            'git_provider': (
+                'untrusted.example.test' if state['scenario'] == 'wrong-provider' else 'github.com'
+            ),
+            'git_https': state['scenario'] != 'source-http',
+            'branch': 'main' if state['scenario'] == 'untested-source' else 'production',
+            'commit': 'old-commit' if state['scenario'] == 'pinned-source' else '',
+            'webhook_enabled': state['scenario'] == 'repo-webhook',
+        }
+        if endpoint == 'read/GetStack':
+            assert body == {'stack': 'fixture stack'}
+            config.update(
+                linked_repo='linked-repo' if state['linked_repo'] else '',
+                auto_update=state['scenario'] == 'auto-update',
+                files_on_host=False, file_contents='', run_build=True,
+                extra_args=['--wait', '--wait-timeout', '180'],
+            )
+            if state['linked_repo']:
+                # The linked repository, not these unused fields, owns the source.
+                config.update(
+                    repo='', branch='main', commit='', webhook_enabled=False,
+                    git_provider='unused.example.test', git_https=False,
+                )
+            if state['scenario'] == 'stack-webhook':
+                config['webhook_enabled'] = True
+            print(json.dumps({
+                'config': config,
+                'info': {
+                    'missing_files': (
+                        ['override.yaml'] if state['scenario'] == 'missing-file' else []
+                    ),
+                },
+            }))
+        else:
+            assert body == {'repo': 'linked-repo'}
+            print(json.dumps({'config': config}))
     elif endpoint == 'execute/DeployStack':
         assert body == {'stack': 'fixture stack'}
         assert state.get('promoted') is True
@@ -75,13 +113,31 @@ sys.exit(exit_code)
 
 
 @pytest.mark.parametrize(
-    "scenario", ["success", "failed-update", "lost-ack", "poll-error", "superseded"]
+    "scenario",
+    [
+        "success",
+        "failed-update",
+        "lost-ack",
+        "poll-error",
+        "superseded",
+        "untested-source",
+        "wrong-provider",
+        "source-http",
+        "pinned-source",
+        "stack-webhook",
+        "repo-webhook",
+        "auto-update",
+        "missing-file",
+    ],
 )
-def test_deployment_waits_for_komodo_result(tmp_path: Path, scenario: str) -> None:
+@pytest.mark.parametrize("linked_repo", [False, True])
+def test_deployment_waits_for_komodo_result(
+    tmp_path: Path, scenario: str, linked_repo: bool
+) -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     step = workflow["jobs"]["deploy-vps"]["steps"][0]
     state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps({"scenario": scenario}))
+    state_file.write_text(json.dumps({"scenario": scenario, "linked_repo": linked_repo}))
     summary = tmp_path / "summary"
     for command in ("gh", "curl", "sleep"):
         executable = tmp_path / command
@@ -108,6 +164,21 @@ def test_deployment_waits_for_komodo_result(tmp_path: Path, scenario: str) -> No
     )
     state = json.loads(state_file.read_text())
     assert state["observed_busy"]
+    if scenario in {
+        "untested-source",
+        "wrong-provider",
+        "source-http",
+        "pinned-source",
+        "stack-webhook",
+        "repo-webhook",
+        "auto-update",
+        "missing-file",
+    }:
+        assert result.returncode != 0
+        assert not state.get("promoted")
+        assert state.get("submissions", 0) == 0
+        assert not summary.exists()
+        return
     if scenario == "superseded":
         assert result.returncode == 0, result.stderr
         assert not state.get("promoted")
