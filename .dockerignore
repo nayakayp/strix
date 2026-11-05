@@ -1,0 +1,19 @@
+# Allow only application/build inputs into the dashboard build context.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!scripts/
+!scripts/tui_sidecar_hook.py
+!scripts/docker.sh
+!containers/
+!containers/**
+!natsuhat/
+!natsuhat/**
+natsuhat/interface/viewer/frontend/
+**/__pycache__/
+**/*.pyc
+**/.env*
+**/.natsuhat/
+**/natsuhat_runs/

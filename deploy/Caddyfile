@@ -1,0 +1,3 @@
+{$NATSUHAT_DOMAIN} {
+	reverse_proxy dashboard:8080
+}

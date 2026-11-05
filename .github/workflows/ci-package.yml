@@ -7,6 +7,32 @@ permissions:
   contents: read
 
 jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Validate the VPS Compose definition
+        env:
+          NATSUHAT_DOMAIN: dashboard.example.test
+          E2B_API_KEY: synthetic-e2b-key
+        run: |
+          docker compose -f deploy/compose.yaml config --format json |
+            jq -e --arg key "$E2B_API_KEY" '.services.dashboard.environment.E2B_API_KEY == $key' > /dev/null
+      - name: Validate the HTTPS proxy configuration
+        run: |
+          docker run --rm -e NATSUHAT_DOMAIN=dashboard.example.test \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/deploy/Caddyfile,target=/etc/caddy/Caddyfile,readonly" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
+      - name: Build the dashboard image
+        run: docker build -f containers/dashboard/Dockerfile -t natsuhat-dashboard:ci .
+      - name: Check health, authorization, shutdown, and persistence without scans
+        env:
+          NATSUHAT_TEST_IMAGE: natsuhat-dashboard:ci
+        run: uv run --frozen pytest -q tests/test_dashboard_image.py
+
   wheel:
     runs-on: ubuntu-latest
     steps:

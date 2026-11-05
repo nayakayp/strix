@@ -1,0 +1,46 @@
+# Komodo Stack: repository root as run directory; deploy/compose.yaml as compose file.
+services:
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      NATSUHAT_DOMAIN: ${NATSUHAT_DOMAIN:?Set the dashboard hostname for HTTPS}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dashboard:
+    build:
+      context: ..
+      dockerfile: containers/dashboard/Dockerfile
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20m
+    expose:
+      - "8080"
+    environment:
+      E2B_API_KEY: ${E2B_API_KEY:?Set the E2B API key for dashboard scans}
+      NATSUHAT_LLM: ${NATSUHAT_LLM:-openai/gpt-5.4}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_BASE: ${LLM_API_BASE:-}
+    volumes:
+      # Includes results, checkpoints, settings, credentials, and source uploads.
+      - /var/lib/natsuhat:/var/lib/natsuhat
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+  caddy-config:

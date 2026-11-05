@@ -123,6 +123,14 @@ ChatGPT subscription authentication is available through
 `uv run --frozen natsuhat auth login chatgpt`. This authenticates with the model
 provider, not a hosted pentesting platform.
 
+## Deploy on a VPS
+
+For a Railway-style workflow on your own server, use
+[Komodo with the included Docker deployment](docs/deployment-vps.md). It supports
+CI-gated deployments after pushes to `main`, persistent results/settings, Caddy HTTPS,
+and container health checks. Automation is opt-in. Upgrades currently restart the
+single dashboard and stop active scans; this is **not zero-downtime deployment**.
+
 ## Documentation and development
 
 Documentation lives in [`docs/`](docs/). Coding-agent workflows live in
