@@ -365,13 +365,13 @@ def test_remote_process_bootstraps_without_application_dependencies(
     worker = remote.RemoteRun(controller)
     monkeypatch.setattr(worker, "sandbox", Sandbox())
     monkeypatch.setattr(worker.stop, "wait", lambda _: False)
+    # Host interpreter paths can also start with /home/runner on GitHub Actions.
+    # Use the VM's executable name so path translation only touches VM paths.
     if reboot:
         with pytest.raises(remote.JobError, match="rebooted instead of restoring process memory"):
-            worker.phase("Setup", [sys.executable, "-c", "exit(7)"])
+            worker.phase("Setup", ["python3", "-c", "exit(7)"])
         return
-    assert (
-        worker.phase("Setup", [sys.executable, "-c", "print('quoted input: a; b'); exit(7)"]) == 7
-    )
+    assert worker.phase("Setup", ["python3", "-c", "print('quoted input: a; b'); exit(7)"]) == 7
     assert "quoted input: a; b" in (controller / "remote.log").read_text()
     assert worker.state["resume_count"] == 1
     # A launch failure must settle, not poll a missing exit marker for an hour.
