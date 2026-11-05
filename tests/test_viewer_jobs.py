@@ -45,17 +45,23 @@ import json, os, signal, sys, time
 from pathlib import Path
 directory = Path(sys.argv[1])
 job = json.loads((directory / 'job.json').read_text())
+# Match the real worker's atomic publication while the dashboard polls state.
+def write_json(name, value):
+    path = directory / name
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(value))
+    temporary.replace(path)
 if '--cleanup' in sys.argv[2:]:
     state = {
         'cleanup': 'paused' if job['runner'] == 'e2b' else 'archived',
         'phase': 'Cleanup finished',
     }
-    (directory / 'runner.json').write_text(json.dumps(state))
+    write_json('runner.json', state)
     sys.exit(130)
 if '--resume' in sys.argv[2:]:
     record = json.loads((directory / 'run.json').read_text())
     record.update(status='running', end_time=None)
-    (directory / 'run.json').write_text(json.dumps(record))
+    write_json('run.json', record)
     print('Resumed checkpoint: ' + job['id'], flush=True)
 print('Synthetic child: ' + job['target'], flush=True)
 if 'NATSUHAT_DASHBOARD_LLM' in os.environ:
@@ -76,17 +82,17 @@ if 'hold' in job['target']:
 time.sleep(0.1)
 code = int(job['target'].rsplit('/', 1)[-1])
 if '/cleanup-pending/' in job['target']:
-    (directory / 'runner.json').write_text(json.dumps({'cleanup': 'pending', 'phase': 'Scanning'}))
+    write_json('runner.json', {'cleanup': 'pending', 'phase': 'Scanning'})
 if '/results-pending/' in job['target']:
-    (directory / 'runner.json').write_text(json.dumps({
+    write_json('runner.json', {
         'cleanup': 'paused' if job['runner'] == 'e2b' else 'archived',
         'phase': 'Failed', 'results_pending': True,
-    }))
+    })
 if '/exit/' in job['target']:
     record = {'run_name': job['id'], 'status': 'completed', 'end_time': '2026-01-01T12:00:00Z'}
-    (directory / 'run.json').write_text(json.dumps(record))
+    write_json('run.json', record)
 if not (directory / 'runner.json').exists():
-    (directory / 'runner.json').write_text(json.dumps({'cleanup': 'paused', 'phase': 'Finished'}))
+    write_json('runner.json', {'cleanup': 'paused', 'phase': 'Finished'})
 sys.exit(code)
 """
 
