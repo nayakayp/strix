@@ -134,23 +134,46 @@ class SupabaseStore:
             ).fetchall()
 
     def scans(self, user_id: str, workspace: str) -> list[dict[str, Any]]:
+        # Polling lists need metadata and severity counts, never full scan output.
         with self.transaction(user_id) as db:
             return db.execute(
-                "SELECT s.*, p.payload, p.generation, p.published_at FROM natsuhat.scans s "
+                "SELECT s.id, s.job, s.runner, "
+                "CASE WHEN p.scan_id IS NULL THEN NULL ELSE jsonb_build_object("
+                "'summary', COALESCE((SELECT jsonb_object_agg(key,value) "
+                "FROM jsonb_each(p.payload->'summary') WHERE key IN "
+                "('targets_info','scan_mode','status','start_time','end_time','finished')), "
+                "'{}'::jsonb), "
+                "'vulnerabilities', COALESCE((SELECT jsonb_agg("
+                "jsonb_build_object('severity',item->'severity')) "
+                "FROM jsonb_array_elements(p.payload->'vulnerabilities') item), '[]'::jsonb)) "
+                "END AS payload FROM natsuhat.scans s "
                 "LEFT JOIN natsuhat.scan_snapshots p "
                 "ON p.workspace_id=s.workspace_id AND p.scan_id=s.id "
                 "WHERE s.workspace_id=%s AND s.deleted_at IS NULL ORDER BY s.created_at DESC",
                 (workspace,),
             ).fetchall()
 
-    def scan(self, user_id: str, workspace: str, name: str) -> dict[str, Any]:
+    def scan(
+        self, user_id: str, workspace: str, name: str | None, *, section: str | None = None
+    ) -> dict[str, Any]:
+        # Restoration needs the whole snapshot; HTTP reads select just one section.
+        payload = sql.SQL("p.payload") if section is None else sql.SQL("p.payload -> %s")
+        parameters: list[Any] = [] if section is None else [section]
+        parameters.append(workspace)
+        selected = sql.SQL("")
+        if name is not None:
+            selected = sql.SQL("AND s.id=%s ")
+            parameters.append(name)
         with self.transaction(user_id) as db:
             row = db.execute(
-                "SELECT s.*, p.payload, p.object_key, p.sha256 FROM natsuhat.scans s "
-                "LEFT JOIN natsuhat.scan_snapshots p "
-                "ON p.workspace_id=s.workspace_id AND p.scan_id=s.id "
-                "WHERE s.workspace_id=%s AND s.id=%s AND s.deleted_at IS NULL",
-                (workspace, name),
+                sql.SQL(
+                    "SELECT s.*, {} AS payload, p.object_key, p.sha256 FROM natsuhat.scans s "
+                    "LEFT JOIN natsuhat.scan_snapshots p "
+                    "ON p.workspace_id=s.workspace_id AND p.scan_id=s.id "
+                    "WHERE s.workspace_id=%s AND s.deleted_at IS NULL {}"
+                    "ORDER BY s.created_at DESC LIMIT 1"
+                ).format(payload, selected),
+                parameters,
             ).fetchone()
         if row is None:
             raise JobError("Unknown scan.", 404)

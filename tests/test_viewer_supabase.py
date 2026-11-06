@@ -381,6 +381,79 @@ def test_http_auth_workspace_isolation_and_revocation(
     assert client.get("/api/runs").status_code == 401
 
 
+def test_compact_catalog_and_selected_run_sections(
+    dashboard: tuple[httpx.Client, HostedDashboard], tmp_path: Path
+) -> None:
+    client, app = dashboard
+    login(client, USER)
+    summary = {
+        "run_id": SCAN,
+        "targets_info": [{"original": "https://authorized.example.test"}],
+        "scan_mode": "deep",
+        "status": "completed",
+        "finished": True,
+        "start_time": "2026-01-01T10:00:00Z",
+        "end_time": None,
+        "scan_results": {"executive_summary": "summary detail " * 10000},
+    }
+    findings = [
+        {"id": "high", "title": "High", "severity": " HIGH ", "description": "a" * 10000},
+        {"id": "info", "title": "Informational", "severity": "info"},
+        {"id": "missing", "title": "No severity"},
+    ]
+    payload = {
+        "summary": summary,
+        "vulnerabilities": findings,
+        "transcript": {"agents": [], "events": [{"text": "event " * 10000}]},
+        "report": "# Full report\n" + "report detail " * 10000,
+    }
+    archive = tmp_path / "results.tar.gz"
+    archive.write_bytes(b"synthetic-archive")
+    app.store.save_job(WORKSPACE, {"id": SCAN, "status": "completed"}, {}, "")
+    app.store.publish(WORKSPACE, SCAN, "00000000000000000001", payload, archive)
+    app.store.save_job(WORKSPACE, {"id": "no-snapshot", "status": "failed"}, {}, "")
+    app.store.save_job(FOREIGN, {"id": "foreign", "status": "completed"}, {}, "")
+
+    # The catalog must stay small even when each snapshot contains large details.
+    catalog = app.store.scans(USER, WORKSPACE)
+    assert len(json.dumps(catalog, default=str)) < 4000
+    runs = client.get("/api/runs").json()["runs"]
+    assert [run["name"] for run in runs] == ["no-snapshot", SCAN]
+    assert runs[1] == {
+        "name": SCAN,
+        "target": "https://authorized.example.test",
+        "scan_mode": "deep",
+        "status": "completed",
+        "start_time": "2026-01-01T10:00:00Z",
+        "end_time": None,
+        "finished": True,
+        "severity_counts": {"critical": 0, "high": 1, "medium": 0, "low": 2},
+    }
+    jobs_by_id = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert jobs_by_id[SCAN]["has_run"] is True
+    assert jobs_by_id["no-snapshot"]["has_run"] is False
+    for endpoint, section in (
+        ("run", "summary"),
+        ("vulnerabilities", "vulnerabilities"),
+        ("report", "report"),
+        ("transcript", "transcript"),
+    ):
+        selected = app.store.scan(USER, WORKSPACE, SCAN, section=section)
+        assert selected["payload"] == payload[section]
+        expected = {"markdown": payload[section]} if section == "report" else payload[section]
+        assert client.get(f"/api/{endpoint}?run={SCAN}").json() == expected
+        assert client.get(f"/api/{endpoint}?run=foreign").status_code == 404
+    assert client.get("/api/run").json()["run_id"] == "no-snapshot"
+    assert client.get("/api/report").json() == {"markdown": ""}
+    assert client.get("/api/vulnerabilities").json() == []
+    assert client.get("/api/transcript").json() == {"agents": [], "events": []}
+    # Checkpoint restoration still needs the full archive metadata and payload.
+    restored = app.store.scan(USER, WORKSPACE, SCAN)
+    assert restored["payload"] == payload
+    assert restored["object_key"]
+    assert restored["sha256"]
+
+
 def test_admin_mfa_and_existing_user_invitation(
     dashboard: tuple[httpx.Client, HostedDashboard],
 ) -> None:

@@ -252,10 +252,9 @@ class HostedDashboard:
             else:
                 result = manager.github.public(refresh=path.endswith("/refresh"))
             return 200, result, {}
-        rows = self.store.scans(identity.user_id, wid)
         if path == "/api/runs":
             entries: list[dict[str, Any]] = []
-            for row in rows:
+            for row in self.store.scans(identity.user_id, wid):
                 payload: dict[str, Any] = row["payload"] or {}
                 summary: dict[str, Any] = payload.get("summary", {})
                 entries.append(
@@ -278,7 +277,7 @@ class HostedDashboard:
             workspace = self.workspaces.get(wid)
             local = {job["id"]: job for job in workspace.manager.list()} if workspace else {}
             jobs: list[dict[str, Any]] = []
-            for row in rows:
+            for row in self.store.scans(identity.user_id, wid):
                 # A replacement controller has no local checkpoint yet. Offer
                 # resume for retained snapshots; restore validates the actual
                 # checkpoint before ScanJobManager can launch a paid worker.
@@ -327,24 +326,32 @@ class HostedDashboard:
             workspace = self.workspace(wid)
             workspace.restore(identity.user_id, name)
             return 200, {"text": workspace.manager.log(name)}, {}
-        name = (query.get("run") or [rows[0]["id"] if rows else ""])[0]
-        row = self.store.scan(identity.user_id, wid, name)
-        payload = row["payload"] or {}
+        sections = {
+            "/api/run": "summary",
+            "/api/vulnerabilities": "vulnerabilities",
+            "/api/report": "report",
+            "/api/transcript": "transcript",
+        }
+        if path not in sections:
+            raise JobError("Unknown endpoint.", 404)
+        run_name = next(iter(query.get("run", [])), None)
+        row = self.store.scan(identity.user_id, wid, run_name, section=sections[path])
+        selected_payload = row["payload"]
         if path == "/api/run":
-            result = payload.get("summary") or {
-                "run_id": name,
-                "run_name": name,
+            result = selected_payload or {
+                "run_id": row["id"],
+                "run_name": row["id"],
                 **row["job"],
                 "finished": False,
             }
         elif path == "/api/vulnerabilities":
-            result = payload.get("vulnerabilities", [])
+            result = selected_payload if selected_payload is not None else []
         elif path == "/api/report":
-            result = {"markdown": payload.get("report", "")}
-        elif path == "/api/transcript":
-            result = payload.get("transcript", {"agents": [], "events": []})
+            result = {"markdown": selected_payload if selected_payload is not None else ""}
         else:
-            raise JobError("Unknown endpoint.", 404)
+            result = (
+                selected_payload if selected_payload is not None else {"agents": [], "events": []}
+            )
         return 200, result, {}
 
     def _auth_route(  # noqa: PLR0911, PLR0912, PLR0915 - account endpoint dispatch
