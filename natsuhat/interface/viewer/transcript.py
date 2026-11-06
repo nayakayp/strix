@@ -39,15 +39,26 @@ def severity_counts(vulns: list[Any]) -> dict[str, int]:
     return counts
 
 
-def build_run_state(run_dir: Path) -> dict[str, Any]:
-    """Agent graph + full per-agent event/message stream.
+def build_run_state(run_dir: Path, *, include_events: bool = True) -> dict[str, Any]:
+    """Agent graph and either full events or lightweight MCP activity.
 
     Reuses the shared ``TuiLiveView`` projection so the viewer and the TUI
     share one parser for ``agents.json`` + ``agents.db`` and never drift.
     """
     view = TuiLiveView()
     view.hydrate_from_run_dir(run_dir)
-    return {"agents": list(view.agents.values()), "events": view.events}
+    agents = list(view.agents.values())
+    if include_events:
+        return {"agents": agents, "events": view.events}
+    in_use = {
+        event["data"]["mcp_connection"]
+        for event in view.events
+        if event["type"] == "tool"
+        and event["data"].get("status") == "running"
+        and isinstance(event["data"].get("mcp_connection"), str)
+        and event["data"]["mcp_connection"]
+    }
+    return {"agents": agents, "mcp_in_use": sorted(in_use)}
 
 
 def read_run_summary(run_dir: Path) -> dict[str, Any]:

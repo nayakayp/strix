@@ -16,6 +16,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 
 from natsuhat.interface.viewer.llm_settings import JobError
 
@@ -103,25 +104,43 @@ class SupabaseStore:
                 retries={"max_attempts": 3},
             ),
         )
+        self.pool = ConnectionPool[psycopg.Connection[dict[str, Any]]](
+            settings.database_url,
+            kwargs={
+                "row_factory": dict_row,
+                "connect_timeout": 10,
+                # Supavisor transaction pooling doesn't support named prepared statements.
+                "prepare_threshold": None,
+            },
+            min_size=1,
+            max_size=8,
+            timeout=10,
+            check=ConnectionPool[psycopg.Connection[dict[str, Any]]].check_connection,
+            open=False,
+        )
+
+    def close(self) -> None:
+        self.pool.close()
 
     @contextlib.contextmanager
     def transaction(
         self, user_id: str | None = None
     ) -> Generator[psycopg.Connection[dict[str, Any]]]:
         # Context and SET ROLE are transaction-local; no identity survives reuse.
-        with psycopg.Connection[dict[str, Any]].connect(
-            self.settings.database_url, row_factory=dict_row, connect_timeout=10
-        ) as connection:
-            connection.execute("SET LOCAL statement_timeout = '30s'")
-            connection.execute(
-                "SET LOCAL ROLE natsuhat_worker"
-                if user_id is None
-                else "SET LOCAL ROLE natsuhat_api"
-            )
-            if user_id:
+        self.pool.open()
+        with self.pool.connection() as connection:
+            # Send setup together instead of waiting one network round trip per SET.
+            with connection.pipeline():
+                connection.execute("SET LOCAL statement_timeout = '30s'")
                 connection.execute(
-                    "SELECT set_config('request.jwt.claim.sub', %s, true)", (user_id,)
+                    "SET LOCAL ROLE natsuhat_worker"
+                    if user_id is None
+                    else "SET LOCAL ROLE natsuhat_api"
                 )
+                if user_id:
+                    connection.execute(
+                        "SELECT set_config('request.jwt.claim.sub', %s, true)", (user_id,)
+                    )
             yield connection
 
     def workspaces(self, user_id: str) -> list[dict[str, Any]]:
@@ -133,12 +152,14 @@ class SupabaseStore:
                 (user_id,),
             ).fetchall()
 
-    def scans(self, user_id: str, workspace: str) -> list[dict[str, Any]]:
-        # Polling lists need metadata and severity counts, never full scan output.
+    def scans(
+        self, user_id: str, workspace: str, *, include_summary: bool = True
+    ) -> list[dict[str, Any]]:
+        # Job lists need only snapshot existence; history also needs severity counts.
         with self.transaction(user_id) as db:
             return db.execute(
                 "SELECT s.id, s.job, s.runner, "
-                "CASE WHEN p.scan_id IS NULL THEN NULL ELSE jsonb_build_object("
+                "CASE WHEN p.scan_id IS NULL THEN NULL WHEN %s THEN jsonb_build_object("
                 "'summary', COALESCE((SELECT jsonb_object_agg(key,value) "
                 "FROM jsonb_each(p.payload->'summary') WHERE key IN "
                 "('targets_info','scan_mode','status','start_time','end_time','finished')), "
@@ -146,19 +167,34 @@ class SupabaseStore:
                 "'vulnerabilities', COALESCE((SELECT jsonb_agg("
                 "jsonb_build_object('severity',item->'severity')) "
                 "FROM jsonb_array_elements(p.payload->'vulnerabilities') item), '[]'::jsonb)) "
-                "END AS payload FROM natsuhat.scans s "
+                "ELSE '{}'::jsonb END AS payload FROM natsuhat.scans s "
                 "LEFT JOIN natsuhat.scan_snapshots p "
                 "ON p.workspace_id=s.workspace_id AND p.scan_id=s.id "
                 "WHERE s.workspace_id=%s AND s.deleted_at IS NULL ORDER BY s.created_at DESC",
-                (workspace,),
+                (include_summary, workspace),
             ).fetchall()
 
     def scan(
-        self, user_id: str, workspace: str, name: str | None, *, section: str | None = None
+        self,
+        user_id: str,
+        workspace: str,
+        name: str | None,
+        *,
+        section: str | None = None,
+        include_events: bool = True,
     ) -> dict[str, Any]:
         # Restoration needs the whole snapshot; HTTP reads select just one section.
         payload = sql.SQL("p.payload") if section is None else sql.SQL("p.payload -> %s")
         parameters: list[Any] = [] if section is None else [section]
+        if section == "transcript" and not include_events:
+            # Counts and MCP indicators must not transfer tool arguments/results.
+            payload = sql.SQL(
+                "jsonb_build_object('agents', COALESCE(p.payload#>'{transcript,agents}', "
+                "'[]'::jsonb), 'mcp_in_use', COALESCE(jsonb_path_query_array(p.payload, "
+                '\'$.transcript.events[*] ? (@.type == "tool" && '
+                "@.data.status == \"running\").data.mcp_connection'), '[]'::jsonb))"
+            )
+            parameters = []
         parameters.append(workspace)
         selected = sql.SQL("")
         if name is not None:

@@ -37,6 +37,7 @@ export interface TranscriptEvent {
 export interface Transcript {
   agents: TranscriptAgent[];
   events: TranscriptEvent[];
+  mcp_in_use?: string[];
 }
 
 /**
@@ -79,7 +80,6 @@ export interface LoadedRun {
   finished: boolean;
   vulnerabilities: Vulnerability[];
   reportMarkdown: string | null;
-  transcript: Transcript;
 }
 
 // Tab-local context, updated only when HostedGate displays a new session.
@@ -94,8 +94,8 @@ export function workspaceHeaders(): Record<string, string> {
   return hostedWorkspace ? { "X-Natsuhat-Workspace": hostedWorkspace } : {};
 }
 
-async function getJson(path: string): Promise<unknown> {
-  const res = await fetch(path, { cache: "no-store", headers: workspaceHeaders() });
+async function getJson(path: string, signal?: AbortSignal): Promise<unknown> {
+  const res = await fetch(path, { cache: "no-store", headers: workspaceHeaders(), signal });
   if (!res.ok) throw new Error(`${path} responded ${res.status}`);
   return res.json();
 }
@@ -130,23 +130,28 @@ export async function fetchReportMarkdown(runName?: string | null): Promise<stri
   return obj?.markdown ?? null;
 }
 
-export async function fetchTranscript(runName?: string | null): Promise<Transcript> {
-  const obj = (await getJson("/api/transcript" + runQuery(runName))) as Partial<Transcript>;
+export async function fetchTranscript(
+  runName?: string | null,
+  { includeEvents = true, signal }: { includeEvents?: boolean; signal?: AbortSignal } = {}
+): Promise<Transcript> {
+  let query = runQuery(runName);
+  if (!includeEvents) query += `${query ? "&" : "?"}events=0`;
+  const obj = (await getJson("/api/transcript" + query, signal)) as Partial<Transcript>;
   return {
     agents: Array.isArray(obj?.agents) ? obj.agents : [],
     events: Array.isArray(obj?.events) ? obj.events : [],
+    mcp_in_use: Array.isArray(obj?.mcp_in_use) ? obj.mcp_in_use.filter(name => typeof name === "string" && name) : undefined,
   };
 }
 
-/** One-shot fetch of every endpoint (used on mount and on final settle). */
-export async function fetchAll(runName?: string | null): Promise<LoadedRun> {
+/** Overview data never waits for the agent activity stream. */
+export async function fetchOverview(runName?: string | null): Promise<LoadedRun> {
   const { summary, raw, finished } = await fetchRunSummary(runName);
-  const [vulnerabilities, reportMarkdown, transcript] = await Promise.all([
+  const [vulnerabilities, reportMarkdown] = await Promise.all([
     fetchVulnerabilities(summary.runId, runName).catch(() => [] as Vulnerability[]),
     fetchReportMarkdown(runName).catch(() => null),
-    fetchTranscript(runName).catch(() => ({ agents: [], events: [] }) as Transcript),
   ]);
-  return { summary, raw, finished, vulnerabilities, reportMarkdown, transcript };
+  return { summary, raw, finished, vulnerabilities, reportMarkdown };
 }
 
 // ---------------------------------------------------------------------------

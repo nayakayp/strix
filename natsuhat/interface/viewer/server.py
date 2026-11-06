@@ -330,7 +330,10 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             elif path == "/api/report":
                 self._send_json(HTTPStatus.OK, {"markdown": read_report_markdown(run_dir)})
             elif path == "/api/transcript":
-                self._send_json(HTTPStatus.OK, build_run_state(run_dir))
+                self._send_json(
+                    HTTPStatus.OK,
+                    build_run_state(run_dir, include_events=query.get("events") != ["0"]),
+                )
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
 

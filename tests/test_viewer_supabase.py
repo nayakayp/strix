@@ -310,6 +310,7 @@ def hosted(
 
     monkeypatch.setattr(psycopg, "connect", runtime)
     yield store, service
+    store.close()
     service.close()
 
 
@@ -342,6 +343,28 @@ def login(client: httpx.Client, user: str) -> None:
 def mfa(client: httpx.Client) -> None:
     response = client.post("/api/auth/mfa/verify", json={"factor_id": FACTOR, "code": "123456"})
     assert response.status_code == 200, response.text
+
+
+def test_reused_transactions_preserve_workspace_isolation(
+    hosted: tuple[SupabaseStore, Services], database: str
+) -> None:
+    store, _service = hosted
+    store.pool.resize(1, 1)
+    for user, expected in ((USER, [WORKSPACE]), (OTHER, [FOREIGN]), (None, [WORKSPACE, FOREIGN])):
+        with store.transaction(user) as db:
+            rows = db.execute("SELECT id::text FROM natsuhat.workspaces ORDER BY id").fetchall()
+        assert [row["id"] for row in rows] == expected
+
+    with pytest.raises(psycopg.errors.DivisionByZero), store.transaction(USER) as db:
+        db.execute("SELECT 1/0")
+    assert [row["id"] for row in store.workspaces(OTHER)] == [FOREIGN]
+
+    # An idle socket can disappear when the database or its proxy restarts.
+    with store.transaction() as db:
+        pid = db.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+    with psycopg.Connection.connect(database, autocommit=True) as db:
+        db.execute("SELECT pg_terminate_backend(%s)", (pid,))
+    assert [row["id"] for row in store.workspaces(USER)] == [WORKSPACE]
 
 
 def test_http_auth_workspace_isolation_and_revocation(
@@ -404,7 +427,28 @@ def test_compact_catalog_and_selected_run_sections(
     payload = {
         "summary": summary,
         "vulnerabilities": findings,
-        "transcript": {"agents": [], "events": [{"text": "event " * 10000}]},
+        "transcript": {
+            "agents": [{"id": "root", "name": "Coordinator"}],
+            "events": [
+                {
+                    "type": "tool",
+                    "data": {
+                        "mcp_connection": "active",
+                        "status": "running",
+                        "args": {"text": "argument " * 10000},
+                    },
+                },
+                {
+                    "type": "tool",
+                    "data": {
+                        "mcp_connection": "idle",
+                        "status": "completed",
+                        "result": "result " * 10000,
+                    },
+                },
+                {"type": "chat", "data": {"mcp_connection": "not-a-tool", "status": "running"}},
+            ],
+        },
         "report": "# Full report\n" + "report detail " * 10000,
     }
     archive = tmp_path / "results.tar.gz"
@@ -417,6 +461,8 @@ def test_compact_catalog_and_selected_run_sections(
     # The catalog must stay small even when each snapshot contains large details.
     catalog = app.store.scans(USER, WORKSPACE)
     assert len(json.dumps(catalog, default=str)) < 4000
+    metadata = app.store.scans(USER, WORKSPACE, include_summary=False)
+    assert {row["id"]: row["payload"] for row in metadata} == {SCAN: {}, "no-snapshot": None}
     runs = client.get("/api/runs").json()["runs"]
     assert [run["name"] for run in runs] == ["no-snapshot", SCAN]
     assert runs[1] == {
@@ -443,10 +489,17 @@ def test_compact_catalog_and_selected_run_sections(
         expected = {"markdown": payload[section]} if section == "report" else payload[section]
         assert client.get(f"/api/{endpoint}?run={SCAN}").json() == expected
         assert client.get(f"/api/{endpoint}?run=foreign").status_code == 404
+    activity = {"agents": payload["transcript"]["agents"], "mcp_in_use": ["active"]}
+    assert client.get(f"/api/transcript?run={SCAN}&events=0").json() == activity
+    compact = app.store.scan(USER, WORKSPACE, SCAN, section="transcript", include_events=False)
+    assert compact["payload"] == activity
+    assert len(json.dumps(compact, default=str)) < 2000
+    assert client.get("/api/transcript?run=foreign&events=0").status_code == 404
     assert client.get("/api/run").json()["run_id"] == "no-snapshot"
     assert client.get("/api/report").json() == {"markdown": ""}
     assert client.get("/api/vulnerabilities").json() == []
     assert client.get("/api/transcript").json() == {"agents": [], "events": []}
+    assert client.get("/api/transcript?events=0").json() == {"agents": [], "mcp_in_use": []}
     # Checkpoint restoration still needs the full archive metadata and payload.
     restored = app.store.scan(USER, WORKSPACE, SCAN)
     assert restored["payload"] == payload

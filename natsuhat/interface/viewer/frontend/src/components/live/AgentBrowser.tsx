@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Bot, ChevronDown, ChevronRight } from "lucide-react";
 import { AgentTranscript } from "./AgentTranscript";
 import { ScanPromptComposer } from "./ScanPromptComposer";
-import type { LoadedRun, TranscriptAgent, TranscriptEvent } from "@/data/serverSource";
+import type { Transcript, TranscriptAgent, TranscriptEvent } from "@/data/serverSource";
 
 const STATUS_DOT: Record<string, string> = {
   completed: "bg-emerald-400",
@@ -13,8 +13,8 @@ const STATUS_DOT: Record<string, string> = {
   failed: "bg-red-400",
 };
 
-export default function AgentBrowser({ run, canSteer }: { run: LoadedRun; canSteer: boolean }) {
-  const { agents, events } = run.transcript;
+export default function AgentBrowser({ transcript, finished, canSteer }: { transcript: Transcript; finished: boolean; canSteer: boolean }) {
+  const { agents, events } = transcript;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const { roots, children, byId } = useMemo(() => {
@@ -28,7 +28,7 @@ export default function AgentBrowser({ run, canSteer }: { run: LoadedRun; canSte
     return { roots, children, byId };
   }, [agents]);
   const selected = (selectedId ? byId.get(selectedId) : null) ?? roots[0];
-  const steerable = canSteer && !run.finished;
+  const steerable = canSteer && !finished;
 
   function renderBranch(agent: TranscriptAgent) {
     const descendants = children.get(agent.id) ?? [];
@@ -66,7 +66,7 @@ export default function AgentBrowser({ run, canSteer }: { run: LoadedRun; canSte
   }
 
   return <div className="space-y-4">
-    {agents.length === 0 ? <div className="rounded-xl border border-[#222] p-8 text-center text-sm text-[#888]">{run.finished ? "No agents recorded for this run." : "Waiting for the first agent…"}</div> : <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(16rem,0.85fr)_minmax(0,1.4fr)] lg:h-[min(56dvh,40rem)] lg:min-h-80">
+    {agents.length === 0 ? <div className="rounded-xl border border-[#222] p-8 text-center text-sm text-[#888]">{finished ? "No agents recorded for this run." : "Waiting for the first agent…"}</div> : <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(16rem,0.85fr)_minmax(0,1.4fr)] lg:h-[min(56dvh,40rem)] lg:min-h-80">
       <nav aria-label="Agent hierarchy" className={`${selectedId ? "hidden lg:flex" : "flex"} min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-[#222] bg-white/[0.02]`}>
         <h2 className="flex shrink-0 items-center gap-2 border-b border-[#222] px-4 py-3 text-sm font-semibold"><Bot className="h-4 w-4 text-[#888]" aria-hidden="true" />Agents<span className="ml-auto text-xs font-normal text-[#888]">{agents.length}</span></h2>
         <ul className="min-h-0 overflow-auto p-2 scrollbar-thin">{roots.map(renderBranch)}</ul>

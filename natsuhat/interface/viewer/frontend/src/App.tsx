@@ -8,7 +8,7 @@ import { ContentSection } from "@/components/vulnerability/ContentSection";
 import AgentBrowser from "@/components/live/AgentBrowser";
 import { severityCounts, type ParsedRunSummary } from "@/lib/local-run-parser";
 import {
-  fetchAll,
+  fetchOverview,
   fetchCapabilities,
   fetchRunSummary,
   fetchRuns,
@@ -18,6 +18,7 @@ import {
   parseMcpConnectionStatus,
   type LoadedRun,
   type RunsPayload,
+  type Transcript,
 } from "@/data/serverSource";
 import { runTitle } from "@/lib/target-utils";
 import Sidebar from "@/components/Sidebar";
@@ -52,6 +53,10 @@ export default function App() {
   const hosted = useContext(HostedContext);
   const [activeRun, setActiveRun] = useState<string | null>(() => readPage().run);
   const [run, setRun] = useState<LoadedRun | null>(null);
+  const [transcript, setTranscript] = useState<Transcript | null>(null);
+  const [transcriptLoading, setTranscriptLoading] = useState(true);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [transcriptRetry, setTranscriptRetry] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -76,27 +81,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void refreshRuns();
     // Capabilities never change over a session, so fetch once on mount.
     fetchCapabilities()
       .then((caps) => {
         setCanSteer(caps.can_steer);
         setCanManageScans(caps.can_manage_scans);
+        // Management uses /api/jobs; only read-only viewers need the history catalog.
+        if (!caps.can_manage_scans) void refreshRuns();
       })
       .catch(() => {
         /* absence of steering is the safe default */
+        void refreshRuns();
       });
   }, [refreshRuns]);
 
-  useEffect(() => {
-    if (!canManageScans) return;
-    const timer = setInterval(() => void refreshRuns(), 2000);
-    return () => clearInterval(timer);
-  }, [canManageScans, refreshRuns]);
-
   // Live polling, scoped to the active run. Re-runs when the active run changes
-  // so switching to a past run (?run=<name>) reloads its data; a finished run
-  // does a single full fetch and stops.
+  // so switching to a past run (?run=<name>) reloads its overview; a finished
+  // run does a single overview fetch and stops. Activity loads separately.
   const finishedRef = useRef(false);
   useEffect(() => {
     if (!activeRun) return;
@@ -115,20 +116,16 @@ export default function App() {
         if (cancelled) return;
         if (finished && !finishedRef.current) {
           finishedRef.current = true;
-          const full = await fetchAll(activeRun);
+          const full = await fetchOverview(activeRun);
           if (!cancelled) setRun(full);
           return; // stop polling
         }
-        const [transcript, vulnerabilities] = await Promise.all([
-          fetchTranscript(activeRun).catch(() => ({ agents: [], events: [] })),
-          fetchVulnerabilities(summary.runId, activeRun).catch(() => [] as Vulnerability[]),
-        ]);
+        const vulnerabilities = await fetchVulnerabilities(summary.runId, activeRun).catch(() => [] as Vulnerability[]);
         if (cancelled) return;
         setRun((prev) => ({
           summary,
           raw,
           finished,
-          transcript,
           vulnerabilities,
           reportMarkdown: prev?.reportMarkdown ?? null,
         }));
@@ -142,7 +139,7 @@ export default function App() {
 
     (async () => {
       try {
-        const full = await fetchAll(activeRun);
+        const full = await fetchOverview(activeRun);
         if (cancelled) return;
         setRun(full);
         if (full.finished) {
@@ -163,12 +160,49 @@ export default function App() {
     };
   }, [activeRun]);
 
+  // Overview needs only the roster and MCP indicators. Transfer and poll event
+  // bodies only while Agents is open; abort requests when navigating away.
+  useEffect(() => {
+    if (!activeRun || !run) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    // Completion refreshes keep the current inspector and agent selection mounted.
+    setTranscriptError(null);
+
+    const load = async () => {
+      try {
+        const data = await fetchTranscript(activeRun, {
+          includeEvents: view === "agents",
+          signal: controller.signal,
+        });
+        if (cancelled) return;
+        setTranscript(data);
+        setTranscriptError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setTranscriptError(e instanceof Error ? e.message : "Could not load agent activity.");
+      } finally {
+        if (!cancelled) {
+          setTranscriptLoading(false);
+          if (!run.finished) timer = setTimeout(load, POLL_MS);
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeRun, view, run?.finished, transcriptRetry]);
+
   const counts = useMemo(
     () => (run ? severityCounts(run.vulnerabilities) : null),
     [run]
   );
   const selected = run?.vulnerabilities.find((v) => v.id === selectedId) ?? null;
-  const agentCount = run?.transcript.agents.length ?? 0;
+  const agentCount = transcript?.agents.length ?? null;
 
   // The run's persisted MCP roster (from run.json via /api/run), plus the set of
   // connections with a tool call currently in flight. "In use" is derived here
@@ -181,23 +215,27 @@ export default function App() {
     [run]
   );
   const mcpInUse = useMemo(() => {
-    const inUse = new Set<string>();
-    for (const event of run?.transcript.events ?? []) {
+    const inUse = new Set<string>(transcript?.mcp_in_use ?? []);
+    for (const event of transcript?.events ?? []) {
       if (event.type !== "tool") continue;
       const connection = event.data?.mcp_connection;
       if (typeof connection !== "string" || !connection) continue;
       if (event.data?.status === "running") inUse.add(connection);
     }
     return inUse;
-  }, [run]);
+  }, [transcript]);
 
   useEffect(() => {
     const onNavigate = () => {
       const page = readPage();
       setView(page.view);
       setCreating(page.creating);
+      if (page.view === "agents" && view !== page.view) setTranscriptLoading(true);
       if (activeRun !== page.run) {
         setRun(null);
+        setTranscript(null);
+        setTranscriptLoading(true);
+        setTranscriptError(null);
         setError(null);
       }
       setActiveRun(page.run);
@@ -205,7 +243,7 @@ export default function App() {
     };
     window.addEventListener("hashchange", onNavigate);
     return () => window.removeEventListener("hashchange", onNavigate);
-  }, [activeRun]);
+  }, [activeRun, view]);
 
   const userSetView = useCallback((v: View, name?: string) => {
     setSelectedId(null);
@@ -217,9 +255,9 @@ export default function App() {
     window.location.hash = params.toString();
   }, [activeRun]);
 
-  const selectRun = useCallback((name: string) => {
+  const selectRun = useCallback((name: string, finished?: boolean) => {
     const entry = runs?.runs.find(item => item.name === name);
-    userSetView(entry && !entry.finished ? "agents" : "overview", name);
+    userSetView((finished ?? entry?.finished) === false ? "agents" : "overview", name);
   }, [runs, userSetView]);
 
   async function removeRun(name: string) {
@@ -312,9 +350,9 @@ export default function App() {
                 <TabButton active={view === "overview"} onClick={() => userSetView("overview")}>
                   Overview
                 </TabButton>
-                {(!run.finished || agentCount > 0) && (
+                {(!run.finished || agentCount !== 0) && (
                   <TabButton active={view === "agents"} onClick={() => userSetView("agents")}>
-                    Agents ({agentCount})
+                    Agents{agentCount === null ? "" : ` (${agentCount})`}
                   </TabButton>
                 )}
               </div>
@@ -331,9 +369,19 @@ export default function App() {
                   reportMarkdown={run.reportMarkdown}
                   raw={run.raw}
                 />
-              ) : view === "agents" ? (
-                <AgentBrowser run={run} canSteer={canSteer} />
-              ) : null}
+              ) : view === "agents" ? (transcriptLoading ? (
+                <p role="status" className="rounded-xl border border-[#222] p-8 text-center text-sm text-[#888]">Loading agent activity…</p>
+              ) : transcriptError ? (
+                <div role="alert" className="rounded-xl border border-red-500/30 p-5 text-sm text-red-300">
+                  <p>Could not load agent activity.</p>
+                  <button type="button" onClick={() => {
+                    setTranscriptLoading(true);
+                    setTranscriptRetry(value => value + 1);
+                  }} className="mt-3 cursor-pointer underline">Retry</button>
+                </div>
+              ) : transcript ? (
+                <AgentBrowser transcript={transcript} finished={run.finished} canSteer={canSteer} />
+              ) : null) : null}
             </>
           ) : null}
           </div>
@@ -487,7 +535,7 @@ function OverviewTab({
   finished: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
-  agentCount: number;
+  agentCount: number | null;
   reportMarkdown: string | null;
   raw: Record<string, unknown>;
 }) {
@@ -510,7 +558,7 @@ function OverviewTab({
         <div className="min-w-0 flex-1 space-y-3">
           <h2 className="text-sm font-semibold">Summary</h2>
           {summaryMarkdown ? <div className="line-clamp-4"><ContentSection content={stripLeadingHeading(summaryMarkdown)} /></div> : <p className="text-sm text-[#aaa]">{finished ? `Scan ${summary.status?.replaceAll("_", " ") ?? "finished"}. No summary was saved.` : "Scan in progress. The summary will appear here when available."}</p>}
-          <p className="flex items-center gap-2 text-xs text-[#888]"><Bot className="h-3.5 w-3.5" aria-hidden="true" />{agentCount} {agentCount === 1 ? "agent" : "agents"}</p>
+          <p className="flex items-center gap-2 text-xs text-[#888]"><Bot className="h-3.5 w-3.5" aria-hidden="true" />{agentCount === null ? "Loading agent count…" : `${agentCount} ${agentCount === 1 ? "agent" : "agents"}`}</p>
         </div>
       </section>
 

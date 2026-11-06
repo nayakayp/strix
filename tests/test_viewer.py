@@ -219,6 +219,31 @@ def _get(url: str, *, cookie: str | None = None) -> tuple[int, str, bytes]:
 
 def test_server_serves_api_and_static(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = _make_run(tmp_path, "served", status="completed", end_time="2026-01-01T00:00:00Z")
+    messages = [
+        {
+            "type": "function_call",
+            "call_id": "active-call",
+            "name": "call_mcp",
+            "arguments": json.dumps({"connection": "active", "tool": "query", "text": "a" * 10000}),
+        },
+        {
+            "type": "function_call",
+            "call_id": "idle-call",
+            "name": "call_mcp",
+            "arguments": json.dumps({"connection": "idle", "tool": "query"}),
+        },
+        {"type": "function_call_output", "call_id": "idle-call", "output": "result " * 10000},
+    ]
+    with sqlite3.connect(run_dir / ".state" / "agents.db") as db:
+        db.execute(
+            "CREATE TABLE agent_messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, "
+            "message_data TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        db.executemany(
+            "INSERT INTO agent_messages(session_id,message_data,created_at) "
+            "VALUES ('root',?,'2026-01-01T00:00:00+00:00')",
+            [(json.dumps(message),) for message in messages],
+        )
 
     assets = tmp_path / "bundle"
     (assets / "assets").mkdir(parents=True)
@@ -235,7 +260,20 @@ def test_server_serves_api_and_static(tmp_path: Path, monkeypatch: pytest.Monkey
         assert json.loads(body)["finished"] is True
 
         status, _, body = _get(f"{url}/api/transcript", cookie=cookie)
-        assert {a["id"] for a in json.loads(body)["agents"]} == {"root", "child"}
+        full = json.loads(body)
+        assert {a["id"] for a in full["agents"]} == {"root", "child"}
+        assert len(body) > 70000
+        assert _get_status(f"{url}/api/transcript?events=0") == 403
+        status, _, body = _get(f"{url}/api/transcript?events=0", cookie=cookie)
+        activity = json.loads(body)
+        assert set(activity) == {"agents", "mcp_in_use"}
+        assert {a["id"] for a in activity["agents"]} == {"root", "child"}
+        assert activity["mcp_in_use"] == ["active"]
+        assert len(body) < 1000
+        # Metadata reads leave the saved transcript and default response untouched.
+        assert (
+            json.loads(_get(f"{url}/api/transcript", cookie=cookie)[2])["events"] == full["events"]
+        )
 
         # Real asset is served.
         status, ctype, _ = _get(f"{url}/assets/app.js")

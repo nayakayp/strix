@@ -66,7 +66,7 @@ function ScanFailure({ job }: { job: ScanJob }) {
 export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, onDeleteRun, deleting, canDelete = true }: {
   creating: boolean;
   onCreatingChange: (value: boolean) => void;
-  onSelectRun: (name: string) => void;
+  onSelectRun: (name: string, finished: boolean) => void;
   onDeleteRun: (name: string) => Promise<void>;
   deleting: boolean;
   canDelete?: boolean;
@@ -82,6 +82,8 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
   const [error, setError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [llm, setLlm] = useState<string | null>(null);
+  const [llmError, setLlmError] = useState<string | null>(null);
+  const [llmRetry, setLlmRetry] = useState(0);
   const [rerunId, setRerunId] = useState<string | null>(null);
   const [rerunAuthorized, setRerunAuthorized] = useState(false);
   const [resumeId, setResumeId] = useState<string | null>(null);
@@ -135,18 +137,33 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
   }
   const active = atCapacity();
   const unlimitedBudget = Number(budget) === -1;
+  const needsLlm = creating || rerunId !== null || resumeId !== null;
+
+  useEffect(() => {
+    if (!needsLlm) return;
+    let cancelled = false;
+    setLlm(null);
+    setLlmError(null);
+    fetchLlmSettings().then(config => {
+      const provider = config.providers.find(p => p.id === config.selected_id);
+      if (!cancelled) setLlm(provider ? `${provider.name} · ${provider.model}` : "Server CLI settings");
+    }).catch(e => {
+      if (!cancelled) setLlmError(e instanceof Error ? e.message : "Could not load LLM profile.");
+    });
+    return () => { cancelled = true; };
+  }, [needsLlm, llmRetry]);
+
+  const llmLabel = llmError ? <span role="alert" className="text-red-400">{llmError} <button type="button" className="cursor-pointer underline underline-offset-4" onClick={() => setLlmRetry(value => value + 1)}>Retry LLM profile</button></span> : llm ?? "Loading LLM profile…";
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const [state, config] = await Promise.all([fetchJobState(), fetchLlmSettings()]);
-        const provider = config.providers.find(p => p.id === config.selected_id);
+        const state = await fetchJobState();
         if (!cancelled) {
           setJobs(state.jobs);
           setConfiguration(state);
-          setLlm(provider ? `${provider.name} · ${provider.model}` : "Server CLI settings");
           setPollError(null);
         }
       } catch (e) {
@@ -161,7 +178,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (pending || !authorized || active || imageBlocked || sourceBlocked || (source?.kind === "zip" && !source.upload_id)) return;
+    if (pending || !authorized || !llm || active || imageBlocked || sourceBlocked || (source?.kind === "zip" && !source.upload_id)) return;
     setPending(true);
     setError(null);
     try {
@@ -241,7 +258,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
             <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-4 py-4 text-sm text-[#ccc] hover:text-white focus-visible:outline-emerald-400"><ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" aria-hidden="true" />Instructions <span className="text-[#888]">(optional)</span></summary>
             <label className="block px-4 pb-4"><span className="sr-only">Instructions</span><textarea maxLength={16000} rows={3} value={instruction} onChange={(e) => { setInstruction(e.target.value); setAuthorized(false); }} placeholder="Focus on authentication and authorization" className={inputClass} /></label>
           </details>
-          <p className="break-words border-t border-[#292929] pt-5 text-xs text-[#888]">{llm ?? "Loading LLM profile…"} <span aria-hidden="true">·</span> E2B</p>
+          <p className="break-words border-t border-[#292929] pt-5 text-xs text-[#888]">{llmLabel} <span aria-hidden="true">·</span> E2B</p>
           {(runnerCheckError || (checked && imageBlocked)) && <div className="space-y-3">
             {runnerCheckError ? <p role="alert" className="text-sm text-red-400">{runnerCheckError}</p> : <RunnerCheckStatus check={checked} />}
             <div className="flex gap-4"><button type="button" className={buttonClass} onClick={() => setRunnerCheckAttempt(value => value + 1)}>Retry E2B check</button><a href="#page=settings&section=e2b" className="self-center text-xs text-emerald-400 underline underline-offset-4">Configure E2B</a></div>
@@ -258,7 +275,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
           </label>
           <div className="flex justify-end gap-3">
             <button type="button" className={`${buttonClass} !px-5 !py-3`} onClick={() => onCreatingChange(false)}>Cancel</button>
-            <button disabled={!authorized || active || imageBlocked || sourceBlocked || (source?.kind === "zip" && !source.upload_id)} aria-describedby={repositoryId && repositoryRef ? "github-source-status" : undefined} type="submit" className={`${buttonClass} inline-flex items-center gap-2 bg-white !px-5 !py-3 !text-sm font-medium !text-black hover:bg-[#ddd]`}>
+            <button disabled={!authorized || !llm || active || imageBlocked || sourceBlocked || (source?.kind === "zip" && !source.upload_id)} aria-describedby={repositoryId && repositoryRef ? "github-source-status" : undefined} type="submit" className={`${buttonClass} inline-flex items-center gap-2 bg-white !px-5 !py-3 !text-sm font-medium !text-black hover:bg-[#ddd]`}>
               {pending || (!checked && !runnerCheckError) ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}{pending ? source?.kind === "github" ? "Preparing repository…" : "Starting…" : !checked && !runnerCheckError ? "Checking E2B…" : "Start scan"}
             </button>
           </div>
@@ -285,7 +302,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
           const target = job.source?.kind === "github" ? job.source.repository : job.source?.kind === "zip" ? job.source.filename : job.target;
           const status = job.status === "running" ? job.remote?.phase || "Running" : job.status;
           return <article key={job.id} aria-label={`${sourceLabel}: ${target}`} className={`relative rounded-xl border border-[#222] bg-white/[0.02] p-4 transition-colors ${job.has_run ? "hover:border-[#444] hover:bg-white/[0.04]" : ""}`}>
-            {job.has_run && <a href={`#page=pentest&run=${encodeURIComponent(job.id)}`} aria-label={`Open scan ${target}`} className="absolute inset-0 rounded-xl focus-visible:outline-2 focus-visible:outline-emerald-400" onClick={event => { event.preventDefault(); onSelectRun(job.id); }} />}
+            {job.has_run && <a href={`#page=pentest&run=${encodeURIComponent(job.id)}`} aria-label={`Open scan ${target}`} className="absolute inset-0 rounded-xl focus-visible:outline-2 focus-visible:outline-emerald-400" onClick={event => { event.preventDefault(); onSelectRun(job.id, !ACTIVE.has(job.status)); }} />}
             <div className="pointer-events-none flex items-center gap-3">
               <SourceIcon className="h-5 w-5 shrink-0 text-[#888]" role="img" aria-label={sourceLabel} />
               <div className="min-w-0 flex-1">
@@ -304,7 +321,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
             {job.status !== "failed" && !ACTIVE.has(job.status) && !job.error && job.remote?.sync_error && <p role="alert" className="pointer-events-none mt-3 text-xs text-red-400">{job.remote.sync_error}</p>}
             {job.can_resume && resumeId === job.id && <div id={`resume-${job.id}`} className="relative z-10 mt-4 space-y-3 rounded-lg border border-emerald-500/30 bg-[#07120c] p-4">
               <p className="text-sm font-medium">Resume stopped scan?</p>
-              <p className="text-xs leading-relaxed text-[#aaa]">Continues this same run from its saved agent checkpoint, preserving conversation history and findings. {job.remote ? "Restores the retained sandbox; it does not create a new VM. Provider compute charges resume." : "Recreates the local tool sandbox; previous running commands are not restored."} Uses the currently selected LLM: {llm ?? "Loading…"}.</p>
+              <p className="text-xs leading-relaxed text-[#aaa]">Continues this same run from its saved agent checkpoint, preserving conversation history and findings. {job.remote ? "Restores the retained sandbox; it does not create a new VM. Provider compute charges resume." : "Recreates the local tool sandbox; previous running commands are not restored."} Uses the currently selected LLM: {llmLabel}.</p>
               {job.source && <p className="text-xs text-emerald-400">Uses the same source snapshot, not the latest GitHub branch or a new upload.</p>}
               <label className="block text-xs text-[#aaa]">Total LLM budget (USD)
                 <input type="number" step="any" value={resumeBudget} onChange={e => { setResumeBudget(e.target.value); setResumeAuthorized(false); setError(null); }} disabled={pending} aria-describedby={`resume-budget-${job.id}`} className={inputClass} />
@@ -323,7 +340,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
             {job.status === "failed" && rerunId === job.id && <div id={`rerun-${job.id}`} className="relative z-10 mt-4 space-y-3 rounded-lg border border-emerald-500/30 bg-[#07120c] p-4">
               <p className="text-sm font-medium">Rerun failed scan?</p>
               {job.source && <p className="text-xs text-emerald-400">Uses the exact same source snapshot, in a new working copy.</p>}
-              <p className="text-xs leading-relaxed text-[#aaa]">Creates a new E2B job with the same target, scan mode, LLM budget, and instructions. E2B compute is billed separately. The failed attempt stays unchanged. Uses the currently selected LLM: {llm ?? "Loading…"}.</p>
+              <p className="text-xs leading-relaxed text-[#aaa]">Creates a new E2B job with the same target, scan mode, LLM budget, and instructions. E2B compute is billed separately. The failed attempt stays unchanged. Uses the currently selected LLM: {llmLabel}.</p>
               <label className="flex items-start gap-2 text-xs leading-relaxed text-[#aaa]">
                 <input type="checkbox" checked={rerunAuthorized} disabled={pending || active} onChange={e => setRerunAuthorized(e.target.checked)} className="mt-0.5 accent-emerald-500" />
                 {job.max_budget_usd === -1

@@ -47,6 +47,7 @@ class HostedDashboard:
         acquired = self.owner.execute("SELECT pg_try_advisory_lock(173528991, 1)").fetchone()
         if not acquired or not acquired[0]:
             self.owner.close()
+            self.store.close()
             raise JobError("Another hosted controller owns this database.", 409)
         try:
             with self.store.transaction() as db:
@@ -58,6 +59,7 @@ class HostedDashboard:
                         self.workspace(path.name)
         except BaseException:
             self.owner.close()
+            self.store.close()
             raise
         self.publisher = threading.Thread(
             target=self._publish, name="supabase-publisher", daemon=True
@@ -97,10 +99,13 @@ class HostedDashboard:
 
     def close(self) -> None:
         self.stopped.set()
-        self.publisher.join(timeout=70)
-        for workspace in list(self.workspaces.values()):
-            workspace.close()
-        self.owner.close()
+        try:
+            self.publisher.join(timeout=70)
+            for workspace in list(self.workspaces.values()):
+                workspace.close()
+        finally:
+            self.owner.close()
+            self.store.close()
 
     def dispatch(  # noqa: PLR0911, PLR0912, PLR0915 - endpoint authorization stays beside each action
         self,
@@ -277,7 +282,7 @@ class HostedDashboard:
             workspace = self.workspaces.get(wid)
             local = {job["id"]: job for job in workspace.manager.list()} if workspace else {}
             jobs: list[dict[str, Any]] = []
-            for row in self.store.scans(identity.user_id, wid):
+            for row in self.store.scans(identity.user_id, wid, include_summary=False):
                 # A replacement controller has no local checkpoint yet. Offer
                 # resume for retained snapshots; restore validates the actual
                 # checkpoint before ScanJobManager can launch a paid worker.
@@ -335,7 +340,10 @@ class HostedDashboard:
         if path not in sections:
             raise JobError("Unknown endpoint.", 404)
         run_name = next(iter(query.get("run", [])), None)
-        row = self.store.scan(identity.user_id, wid, run_name, section=sections[path])
+        include_events = query.get("events") != ["0"]
+        row = self.store.scan(
+            identity.user_id, wid, run_name, section=sections[path], include_events=include_events
+        )
         selected_payload = row["payload"]
         if path == "/api/run":
             result = selected_payload or {
