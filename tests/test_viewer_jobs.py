@@ -158,8 +158,9 @@ def settled(manager: jobs.ScanJobManager, name: str) -> dict[str, Any]:
 
 @pytest.mark.usefixtures("child_process")
 @pytest.mark.parametrize("runner", ["e2b", "local", "daytona"])
+@pytest.mark.parametrize("status", ["failed", "interrupted", "stopped"])
 def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # noqa: PLR0915
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str, status: str
 ) -> None:
     monkeypatch.setenv("E2B_API_KEY", "synthetic-provider-key")
     monkeypatch.setenv("NATSUHAT_REMOTE_MAX_CONCURRENT", "1")
@@ -172,19 +173,19 @@ def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # no
         "id": name,
         "runner": runner,
         "target": "https://hold.example.test",
-        "status": "stopped",
+        "status": status,
         "start_time": "2026-01-01T10:00:00Z",
         "end_time": "2026-01-01T10:05:00Z",
         "exit_code": 130,
         "error": None,
     }
     (directory / "job.json").write_text(json.dumps(job))
-    record = {"status": "stopped", "llm_usage": {"cost": 1.23}}
+    record = {"status": status, "llm_usage": {"cost": 1.23}}
     (directory / "run.json").write_text(json.dumps(record))
     (directory / "job.log").write_text("ORIGINAL LOG\n")
     findings = '[{"id":"vuln-0001","title":"Saved finding"}]'
     (directory / "vulnerabilities.json").write_text(findings)
-    checkpoint = {"parent_of": {"root": None}, "statuses": {"root": "running"}}
+    checkpoint = {"parent_of": {"root": None}, "statuses": {"root": status}}
     (state / "agents.json").write_text(json.dumps(checkpoint))
     with sqlite3.connect(state / "agents.db") as database:
         database.execute("CREATE TABLE history (content TEXT)")
@@ -216,7 +217,7 @@ def test_resume_http_preserves_run_and_enforces_confirmation_and_capacity(  # no
     try:
         if runner != "e2b":
             legacy = request(url, "/api/jobs", cookie)[1]["jobs"][0]
-            assert legacy["status"] == "stopped" and not legacy["can_resume"]
+            assert legacy["status"] == status and not legacy["can_resume"]
             assert request(url, endpoint, cookie, {"authorized": True})[0] == 409
             if runner == "daytona":
                 assert request(url, f"/api/jobs/{name}/stop", cookie, {})[0] == 400
@@ -363,7 +364,7 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
             == -1
         )
         assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["id"] == name
-        assert request(url, f"/api/jobs/{name}/rerun", cookie, {"authorized": True})[0] == 409
+        assert request(url, f"/api/jobs/{name}/rerun", cookie, {"authorized": True})[0] == 404
         assert request(url, f"/api/jobs/{name}/stop", cookie, {})[0] == 200
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -374,7 +375,7 @@ def test_job_http_lifecycle_and_guards(tmp_path: Path) -> None:
         assert job["status"] == "stopped"
         assert job["end_time"] is not None
         assert request(url, f"/api/jobs/{name}/stop", cookie, {})[1]["job"]["status"] == "stopped"
-        assert request(url, f"/api/jobs/{name}/rerun", cookie, {"authorized": True})[0] == 409
+        assert request(url, f"/api/jobs/{name}/resume", cookie, {"authorized": True})[0] == 409
         assert request(url, f"/api/run?run={name}", cookie)[1]["finished"] is True
         assert request(url, "/api/runs", cookie)[1]["runs"][0]["name"] == name
     finally:
@@ -649,8 +650,10 @@ def test_job_exit_history_and_logs(
         record = json.loads((base / job["id"] / "run.json").read_text())
         assert record["status"] == status
         if status == "completed":
-            with pytest.raises(jobs.JobError, match="Only failed") as error:
-                manager.rerun(job["id"], {"authorized": True})
+            with pytest.raises(
+                jobs.JobError, match="Only failed, stopped, or interrupted"
+            ) as error:
+                manager.resume(job["id"], {"authorized": True})
             assert error.value.status == 409
     finally:
         manager.close()
@@ -663,7 +666,7 @@ def test_job_exit_history_and_logs(
 
 @pytest.mark.parametrize("budget", [3.75, -1])
 @pytest.mark.usefixtures("child_process")
-def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
+def test_failed_job_without_checkpoint_cannot_resume_or_rerun_after_restart(
     tmp_path: Path, budget: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner = "e2b"
@@ -691,38 +694,29 @@ def test_failed_job_rerun_preserves_inputs_and_original_after_restart(
 
     httpd, url, token = serve(base / ".dashboard", manage_scans=True, open_browser=False)
     cookie = f"{SESSION_COOKIE_PREFIX}_{httpd.server_address[1]}={token}"
-    path = f"/api/jobs/{original['id']}/rerun"
+    path = f"/api/jobs/{original['id']}/resume"
     try:
         for body in ({}, {"authorized": False}, {"authorized": "true"}):
             assert request(url, path, cookie, body)[0] == 400
         assert (
             request(url, path, cookie, {"authorized": True}, Origin="https://evil.test")[0] == 403
         )
-        assert request(url, "/api/jobs", cookie)[1]["jobs"][0]["id"] == original["id"]
-        assert httpd.job_manager is not None
-        held = httpd.job_manager.start(
-            {**REQUEST, "target": "https://hold.example.test", "runner": runner}
-        )
-        assert request(url, path, cookie, {"authorized": True})[0] == 409
-        httpd.job_manager.stop(held["id"])
-        assert settled(httpd.job_manager, held["id"])["status"] == "stopped"
+        listed = request(url, "/api/jobs", cookie)[1]["jobs"][0]
+        assert listed["id"] == original["id"] and not listed["can_resume"]
+        assert "checkpoint" in listed["resume_unavailable_reason"]
         code, result = request(
             url,
             path,
             cookie,
             {"authorized": True, "target": "https://other.test", "max_budget_usd": 99},
         )
-        assert code == 202
-        rerun = result["job"]
-        assert rerun["id"] != original["id"]
-        assert rerun["target"] == "https://authorized.example.test/usage/1"
-        assert rerun["scan_mode"] == "standard"
-        assert rerun["max_budget_usd"] == budget
-        assert rerun["runner"] == runner
-        assert (base / rerun["id"] / "instructions.txt").read_text() == instruction
-        assert settled(httpd.job_manager, rerun["id"])["status"] == "failed"
+        assert code == 409 and "checkpoint" in result["error"]
+        assert (
+            request(url, f"/api/jobs/{original['id']}/rerun", cookie, {"authorized": True})[0]
+            == 404
+        )
         assert {p.name: p.read_bytes() for p in (base / original["id"]).iterdir()} == original_files
-        assert len(request(url, "/api/jobs", cookie)[1]["jobs"]) == 3
+        assert len(request(url, "/api/jobs", cookie)[1]["jobs"]) == 1
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -830,7 +824,7 @@ def test_unconfirmed_remote_cleanup_can_be_retried_without_rerunning_scan(
         assert result["remote"]["cleanup"] == ("failed" if pending == "cleanup" else retained)
         if pending == "results":
             assert result["remote"]["results_pending"]
-        assert request(url, f"/api/jobs/{name}/rerun", cookie, {"authorized": True})[0] == 409
+        assert request(url, f"/api/jobs/{name}/resume", cookie, {"authorized": True})[0] == 409
         assert request(url, f"/api/jobs/{name}/stop", cookie, {})[0] == 200
         result = settled(httpd.job_manager, name)
         assert result["status"] == "completed"
@@ -1462,7 +1456,7 @@ def test_failed_profile_migration_retains_legacy_copy(
 
 
 @pytest.mark.usefixtures("child_process")
-def test_zip_http_upload_job_rerun_and_delete(
+def test_zip_http_upload_job_resume_and_delete(  # noqa: PLR0915 - full source lifecycle
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner = "e2b"
@@ -1515,18 +1509,28 @@ def test_zip_http_upload_job_rerun_and_delete(
             assert job["target"] == "local-code.zip"
             record = client.get("/api/run", params={"run": job["id"]}).json()
             assert record["source"] == job["source"]
-            rerun = client.post(f"/api/jobs/{job['id']}/rerun", json={"authorized": True})
-            assert rerun.status_code == 202
-            second = rerun.json()["job"]
-            settled(manager, second["id"])
-            assert second["source"] == job["source"]
-            assert second["id"] != job["id"]
+            directory = manager.base_dir / job["id"]
+            state = directory / ".state"
+            state.mkdir()
+            (state / "agents.json").write_text('{"parent_of":{"root":null}}')
+            with sqlite3.connect(state / "agents.db") as database:
+                database.execute("CREATE TABLE history (content TEXT)")
+            (directory / "runner.json").write_text('{"cleanup":"paused","sandbox_id":"same-vm"}')
+            archive = manager.sources.directory(job["id"]) / "source.zip"
+            original_source = archive.read_bytes()
+            resumed = client.post(f"/api/jobs/{job['id']}/resume", json={"authorized": True})
+            assert resumed.status_code == 202
+            same = resumed.json()["job"]
+            settled(manager, same["id"])
+            assert same["source"] == job["source"]
+            assert same["id"] == job["id"]
+            assert archive.read_bytes() == original_source
+            assert len(client.get("/api/jobs").json()["jobs"]) == 1
             assert (
                 client.post(f"/api/runs/{job['id']}/delete", json={"confirmed": True}).status_code
                 == 200
             )
             assert not manager.sources.directory(job["id"]).exists()
-            assert manager.sources.directory(second["id"]).exists()
     finally:
         httpd.shutdown()
         httpd.server_close()

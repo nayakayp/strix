@@ -788,10 +788,11 @@ directory = Path(sys.argv[1])
     workspace.close()
     app.workspaces.pop(FOREIGN)
     job = store.scan(OTHER, FOREIGN, name)["job"]
-    job["status"] = "stopped"
     runner = {"cleanup": "paused", "sandbox_id": "synthetic-retained"}
-    store.save_job(FOREIGN, job, runner, "")
-    assert client.get("/api/jobs").json()["jobs"][0]["can_resume"] is True
+    for status in ("failed", "interrupted", "stopped"):
+        job["status"] = status
+        store.save_job(FOREIGN, job, runner, "")
+        assert client.get("/api/jobs").json()["jobs"][0]["can_resume"] is True
     store.save_job(FOREIGN, job, {**runner, "cleanup": "archived"}, "")
     assert client.get("/api/jobs").json()["jobs"][0]["can_resume"] is False
 

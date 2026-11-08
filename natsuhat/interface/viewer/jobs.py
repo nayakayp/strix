@@ -160,8 +160,8 @@ class ScanJobManager:
     def _resume_error(self, job: dict[str, Any]) -> str | None:  # noqa: PLR0911 - explicit eligibility reasons
         if job.get("runner") != "e2b":
             return "This runner is no longer supported. Start a new E2B scan instead."
-        if job["status"] not in {"stopped", "interrupted"}:
-            return "Only stopped or interrupted scans can be resumed."
+        if job["status"] not in {"failed", "stopped", "interrupted"}:
+            return "Only failed, stopped, or interrupted scans can be resumed."
         directory = self.base_dir / job["id"]
         try:
             record = json.loads((directory / "run.json").read_text())
@@ -349,37 +349,6 @@ class ScanJobManager:
         watcher = threading.Thread(target=self._wait, args=(name, process), daemon=True)
         self._watchers.append(watcher)
         watcher.start()
-
-    def rerun(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
-        if body.get("authorized") is not True:
-            raise JobError("Confirm that you are authorized to test this target.")
-        with self.lock:
-            job = self._jobs.get(name)
-            if job is None:
-                raise JobError("Unknown local scan job.", 404)
-            if job["status"] != "failed":
-                raise JobError("Only failed scan jobs can be rerun.", 409)
-            remote = self._runner_state(name).get("remote", {})
-            if remote.get("cleanup") == "failed" or remote.get("results_pending"):
-                raise JobError(
-                    "Retry results or sandbox cleanup before starting another scan.", 409
-                )
-            instructions = self.base_dir / name / "instructions.txt"
-            if job.get("source", {}).get("kind") == "github":
-                self.github.repository_token(job["source"]["repository_id"])
-            return self.start(
-                {
-                    "target": job["target"],
-                    "scan_mode": job["scan_mode"],
-                    "max_budget_usd": job["max_budget_usd"],
-                    "instruction": instructions.read_text(encoding="utf-8")
-                    if instructions.exists()
-                    else "",
-                    "runner": "e2b",
-                    "authorized": body.get("authorized"),
-                },
-                snapshot=name if job.get("source") else None,
-            )
 
     def resume(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         if body.get("authorized") is not True:

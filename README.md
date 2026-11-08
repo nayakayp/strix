@@ -97,7 +97,7 @@ and the current commit are checked again when submitting.
 
 Sources are stored per workspace under `~/.natsuhat/dashboard/`, outside results
 and scan mounts. Each scan gets an immutable snapshot and a disposable writable
-copy; failed-scan reruns use the same snapshot. Unused uploads expire after 24
+copy; resumed scans use the same snapshot. Unused uploads expire after 24
 hours and are removed on the next upload or server start. Deleting a scan removes
 its local source snapshot. E2B scans explicitly transfer code to the
 provider's retained sandbox; deleting local results does not delete that sandbox.

@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type ButtonHTMLAttributes, type FormEvent } from "react";
 import { ArrowLeft, ChevronRight, FileArchive, GitBranch, Globe, LoaderCircle, Play, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
-import { checkGithubSource, checkRunner, fetchJobLog, fetchJobs, fetchJobState, fetchLlmSettings, rerunJob, resumeJob, startJob, stopJob, type ScanJob, type JobsPayload, type ScanSource, type RunnerCheck } from "@/data/serverSource";
+import { checkGithubSource, checkRunner, fetchJobLog, fetchJobs, fetchJobState, fetchLlmSettings, resumeJob, startJob, stopJob, type ScanJob, type JobsPayload, type ScanSource, type RunnerCheck } from "@/data/serverSource";
 import ScanSourceFields from "@/components/ScanSourceFields";
 import { RunnerCheckStatus } from "@/components/RunnerSettingsView";
 
@@ -84,8 +84,6 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
   const [llm, setLlm] = useState<string | null>(null);
   const [llmError, setLlmError] = useState<string | null>(null);
   const [llmRetry, setLlmRetry] = useState(0);
-  const [rerunId, setRerunId] = useState<string | null>(null);
-  const [rerunAuthorized, setRerunAuthorized] = useState(false);
   const [resumeId, setResumeId] = useState<string | null>(null);
   const [resumeAuthorized, setResumeAuthorized] = useState(false);
   const [resumeBudget, setResumeBudget] = useState("");
@@ -137,7 +135,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
   }
   const active = atCapacity();
   const unlimitedBudget = Number(budget) === -1;
-  const needsLlm = creating || rerunId !== null || resumeId !== null;
+  const needsLlm = creating || resumeId !== null;
 
   useEffect(() => {
     if (!needsLlm) return;
@@ -199,20 +197,6 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
       setJobs(await fetchJobs());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not stop scan.");
-    } finally { setPending(false); }
-  }
-
-  async function rerun(id: string) {
-    if (pending || !rerunAuthorized) return;
-    setPending(true);
-    setError(null);
-    try {
-      await rerunJob(id);
-      setRerunId(null);
-      setRerunAuthorized(false);
-      setJobs(await fetchJobs());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not rerun scan.");
     } finally { setPending(false); }
   }
 
@@ -292,7 +276,7 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
         </div>
         <button id="new-scan-trigger" disabled={pending} className={`${buttonClass} inline-flex items-center gap-2 bg-white !text-black hover:bg-[#ddd]`} onClick={() => { onCreatingChange(true); setAuthorized(false); setSource(null); }}><Plus className="h-4 w-4" aria-hidden="true" />New scan</button>
       </div>
-      {((error && !rerunId && !resumeId) || pollError) && <p role="alert" className="text-sm text-red-400">{pollError || error}</p>}
+      {((error && !resumeId) || pollError) && <p role="alert" className="text-sm text-red-400">{pollError || error}</p>}
 
       <section aria-label="Scan jobs" className="space-y-3">
         <h2 className="text-sm font-semibold">Dashboard scans</h2>
@@ -311,22 +295,22 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
               </div>
               <div className="pointer-events-auto relative z-10 flex shrink-0 gap-2">
                 {(job.remote?.cleanup === "failed" || job.remote?.results_pending) && job.runner === "e2b" && !ACTIVE.has(job.status) && <ScanAction label={job.remote?.results_pending ? "Retry results" : "Retry cleanup"} disabled={pending} onClick={() => void stop(job.id)}><RotateCcw className="h-4 w-4" aria-hidden="true" /></ScanAction>}
-                {job.can_resume && <ScanAction label="Resume scan" disabled={pending || active} aria-expanded={resumeId === job.id} aria-controls={`resume-${job.id}`} onClick={() => { setResumeId(resumeId === job.id ? null : job.id); setResumeAuthorized(false); setResumeBudget(String(job.max_budget_usd)); setRerunId(null); setError(null); }}><Play className="h-4 w-4" aria-hidden="true" /></ScanAction>}
-                {job.status === "failed" && job.remote?.cleanup !== "failed" && !job.remote?.results_pending && <ScanAction label="Rerun scan" disabled={pending || active} aria-expanded={rerunId === job.id} aria-controls={`rerun-${job.id}`} onClick={() => { setRerunId(rerunId === job.id ? null : job.id); setRerunAuthorized(false); setResumeId(null); setError(null); }}><RotateCcw className="h-4 w-4" aria-hidden="true" /></ScanAction>}
+                {job.can_resume && <ScanAction label="Resume scan" disabled={pending || active} aria-expanded={resumeId === job.id} aria-controls={`resume-${job.id}`} onClick={() => { setResumeId(resumeId === job.id ? null : job.id); setResumeAuthorized(false); setResumeBudget(String(job.max_budget_usd)); setError(null); }}><Play className="h-4 w-4" aria-hidden="true" /></ScanAction>}
                 {ACTIVE.has(job.status) && <ScanAction label={job.status === "stopping" ? "Stopping scan…" : "Stop scan"} className="!text-red-400" disabled={pending || job.status === "stopping"} onClick={() => void stop(job.id)}><Square className="h-4 w-4" aria-hidden="true" /></ScanAction>}
                 {canDelete && <ScanAction label="Delete scan" className="!text-red-400" disabled={pending || deleting || ACTIVE.has(job.status) || !!job.remote?.results_pending || (!!job.remote && !["paused", "archived", "deleted", "not_created"].includes(job.remote.cleanup))} onClick={() => void onDeleteRun(job.id)}><Trash2 className="h-4 w-4" aria-hidden="true" /></ScanAction>}
               </div>
             </div>
             {job.status === "failed" ? <ScanFailure job={job} /> : job.error && <p role="alert" className="pointer-events-none mt-3 text-xs text-red-400">{job.error}</p>}
             {job.status !== "failed" && !ACTIVE.has(job.status) && !job.error && job.remote?.sync_error && <p role="alert" className="pointer-events-none mt-3 text-xs text-red-400">{job.remote.sync_error}</p>}
+            {["failed", "stopped", "interrupted"].includes(job.status) && !job.can_resume && job.resume_unavailable_reason && <p className="pointer-events-none mt-3 text-xs text-[#888]">Cannot resume: {job.resume_unavailable_reason}</p>}
             {job.can_resume && resumeId === job.id && <div id={`resume-${job.id}`} className="relative z-10 mt-4 space-y-3 rounded-lg border border-emerald-500/30 bg-[#07120c] p-4">
-              <p className="text-sm font-medium">Resume stopped scan?</p>
+              <p className="text-sm font-medium">Resume {job.status} scan?</p>
               <p className="text-xs leading-relaxed text-[#aaa]">Continues this same run from its saved agent checkpoint, preserving conversation history and findings. {job.remote ? "Restores the retained sandbox; it does not create a new VM. Provider compute charges resume." : "Recreates the local tool sandbox; previous running commands are not restored."} Uses the currently selected LLM: {llmLabel}.</p>
               {job.source && <p className="text-xs text-emerald-400">Uses the same source snapshot, not the latest GitHub branch or a new upload.</p>}
               <label className="block text-xs text-[#aaa]">Total LLM budget (USD)
                 <input type="number" step="any" value={resumeBudget} onChange={e => { setResumeBudget(e.target.value); setResumeAuthorized(false); setError(null); }} disabled={pending} aria-describedby={`resume-budget-${job.id}`} className={inputClass} />
               </label>
-              <p id={`resume-budget-${job.id}`} className="text-xs text-[#888]">Includes spending before the stop; this is not an additional allowance. Increase it if exhausted, or use -1 for unlimited. In-flight requests may exceed the limit.</p>
+              <p id={`resume-budget-${job.id}`} className="text-xs text-[#888]">Includes earlier spending; this is not an additional allowance. Increase it if exhausted, or use -1 for unlimited. In-flight requests may exceed the limit.</p>
               <label className="flex items-start gap-2 text-xs leading-relaxed text-[#aaa]">
                 <input type="checkbox" checked={resumeAuthorized} disabled={pending || active} onChange={e => setResumeAuthorized(e.target.checked)} className="mt-0.5 accent-emerald-500" />
                 I am authorized to continue testing this target and approve the total LLM budget above{job.remote ? " and resumed provider compute charges" : ""}.
@@ -334,22 +318,6 @@ export default function ScanJobsView({ creating, onCreatingChange, onSelectRun, 
               <div className="flex flex-wrap gap-2">
                 <button className={`${buttonClass} bg-white !text-black hover:bg-[#ddd]`} disabled={!resumeAuthorized || pending || active || !llm || !Number.isFinite(Number(resumeBudget)) || (Number(resumeBudget) !== -1 && Number(resumeBudget) <= 0)} onClick={() => void resume(job.id)}>{pending ? "Resuming…" : "Confirm resume"}</button>
                 <button className={buttonClass} disabled={pending} onClick={() => { setResumeId(null); setResumeAuthorized(false); setError(null); }}>Cancel</button>
-              </div>
-              {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
-            </div>}
-            {job.status === "failed" && rerunId === job.id && <div id={`rerun-${job.id}`} className="relative z-10 mt-4 space-y-3 rounded-lg border border-emerald-500/30 bg-[#07120c] p-4">
-              <p className="text-sm font-medium">Rerun failed scan?</p>
-              {job.source && <p className="text-xs text-emerald-400">Uses the exact same source snapshot, in a new working copy.</p>}
-              <p className="text-xs leading-relaxed text-[#aaa]">Creates a new E2B job with the same target, scan mode, LLM budget, and instructions. E2B compute is billed separately. The failed attempt stays unchanged. Uses the currently selected LLM: {llmLabel}.</p>
-              <label className="flex items-start gap-2 text-xs leading-relaxed text-[#aaa]">
-                <input type="checkbox" checked={rerunAuthorized} disabled={pending || active} onChange={e => setRerunAuthorized(e.target.checked)} className="mt-0.5 accent-emerald-500" />
-                {job.max_budget_usd === -1
-                  ? "I am authorized to retest this target and approve LLM usage without a spending cap."
-                  : `I am authorized to retest this target and approve LLM usage up to $${job.max_budget_usd}. In-flight requests may exceed the limit.`}
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <button className={`${buttonClass} bg-white !text-black hover:bg-[#ddd]`} disabled={!rerunAuthorized || pending || active || !llm} onClick={() => void rerun(job.id)}>{pending ? "Starting…" : "Confirm rerun"}</button>
-                <button className={buttonClass} disabled={pending} onClick={() => { setRerunId(null); setRerunAuthorized(false); setError(null); }}>Cancel</button>
               </div>
               {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
             </div>}

@@ -512,14 +512,10 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                         raise JobError("Confirm deletion of this scan and its local results.")
                     manager.delete(unquote(path.removeprefix("/api/runs/").removesuffix("/delete")))
                     self._send_json(HTTPStatus.OK, {"ok": True})
-                elif path.startswith("/api/jobs/") and path.endswith(
-                    ("/rerun", "/resume", "/stop")
-                ):
+                elif path.startswith("/api/jobs/") and path.endswith(("/resume", "/stop")):
                     name, action = path.removeprefix("/api/jobs/").rsplit("/", 1)
                     if action == "resume":
                         job = manager.resume(unquote(name), body)
-                    elif action == "rerun":
-                        job = manager.rerun(unquote(name), body)
                     else:
                         job = manager.stop(unquote(name))
                     response_status = HTTPStatus.OK if action == "stop" else HTTPStatus.ACCEPTED

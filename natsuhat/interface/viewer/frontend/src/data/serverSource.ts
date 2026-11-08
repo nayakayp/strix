@@ -299,11 +299,6 @@ export async function startJob(body: Record<string, unknown>): Promise<void> {
   if (!result.ok) throw new Error(String(result.data.error ?? "Could not start scan."));
 }
 
-export async function rerunJob(id: string): Promise<void> {
-  const result = await postJson(`/api/jobs/${encodeURIComponent(id)}/rerun`, { authorized: true });
-  if (!result.ok) throw new Error(String(result.data.error ?? "Could not rerun scan."));
-}
-
 export async function resumeJob(id: string, max_budget_usd: number): Promise<void> {
   const result = await postJson(`/api/jobs/${encodeURIComponent(id)}/resume`, { authorized: true, max_budget_usd });
   if (!result.ok) throw new Error(String(result.data.error ?? "Could not resume scan."));

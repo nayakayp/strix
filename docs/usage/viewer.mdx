@@ -77,19 +77,14 @@ ten E2B scans may run concurrently by default. Additional starts for a full runn
 pool return `409` rather than queueing. Independently launched CLI scans are not
 managed or counted.
 
-Only **failed** jobs show **Rerun**. Confirm authorization again to create a new
-E2B job with the same target, mode, budget (including `-1`), and saved instructions.
-The rerun uses the currently selected LLM settings and leaves the original job,
-logs, and results unchanged. This starts over; it does not resume a scan. Reruns
-are disabled when that runner pool is full or remote cleanup is unconfirmed.
-Completed, stopped, and interrupted jobs cannot be rerun through this action.
-
-Stopped and interrupted jobs instead show **Resume scan** when their saved agent
+Failed, stopped, and interrupted jobs show **Resume scan** when their saved agent
 checkpoint and session database are available. This continues the same run ID,
 conversation history, findings, and source snapshot, using the currently selected
 LLM settings. Confirm authorization again and set a **total** LLM budget: earlier
 spending still counts. An exhausted cap must be increased, or set to `-1` for
-unlimited spending. Existing concurrency limits still apply.
+unlimited spending. Existing concurrency limits still apply. There is no
+fresh-start retry action; use **New scan** to start over. When a scan cannot
+resume, its card shows the reason.
 
 Resumes restore the original retained E2B sandbox and use its
 installed engine, not the current stable image or a newly created VM. A small
@@ -104,7 +99,7 @@ unconfirmed cleanup must be recovered first.
 If result transfer fails, **Retry results** retrieves files from the retained
 sandbox without launching another scan. It briefly resumes provider compute,
 then pauses the sandbox again; provider charges may apply. Recovery
-is explicit, survives dashboard restarts, and blocks **Rerun** until results and
+is explicit, survives dashboard restarts, and blocks **Resume scan** until results and
 retention are confirmed. A partial recovered run is marked interrupted rather
 than left running. Findings withdrawn on the worker are removed from subsequent
 dashboard snapshots; controller job metadata is preserved.
@@ -217,7 +212,7 @@ Retained sandboxes and credentials in their memory
 remain subject to your provider account's access controls and retention policies.
 Check current provider pricing for paused storage and retained images.
 Unconfirmed pause
-shows **Retry cleanup** and blocks rerunning that job. After a controller
+shows **Retry cleanup** and blocks resuming that job. After a controller
 restart, unresolved E2B resources are paused without restarting scans.
 Verify the provider console if cleanup remains unconfirmed. Historical scans
 from other runners remain readable, but cannot be resumed or recovered through
@@ -229,8 +224,7 @@ The session-protected JSON endpoints are:
 | --- | --- | --- |
 | GET | `/api/jobs` | List jobs, resume eligibility/reason, runner availability/default, concurrency limits, remote phase/cleanup/resume count, and result availability |
 | POST | `/api/jobs` | Start with `target`, `scan_mode`, `max_budget_usd`, `authorized: true`, optional `runner` (`e2b` only, also the default), and optional `instruction` |
-| POST | `/api/jobs/<id>/rerun` | Start a new job from a failed job with `authorized: true`; other statuses return `409` |
-| POST | `/api/jobs/<id>/resume` | Continue a stopped/interrupted checkpoint with `authorized: true` and optional `max_budget_usd` (total cap, defaults to the previous cap); unavailable checkpoints or capacity return `409` |
+| POST | `/api/jobs/<id>/resume` | Continue a failed/stopped/interrupted checkpoint with `authorized: true` and optional `max_budget_usd` (total cap, defaults to the previous cap); unavailable checkpoints or capacity return `409` |
 | POST | `/api/jobs/<id>/stop` | Stop a job, recover pending results, or retry failed remote cleanup (safe to repeat; result recovery can resume compute) |
 | GET | `/api/jobs/<id>/log` | Read the log tail |
 

@@ -170,9 +170,7 @@ class HostedDashboard:
             )
             self.store.audit(wid, identity.user_id, "source.upload", result["upload_id"])
             return 201, result, {}
-        if path == "/api/jobs" or (
-            path.startswith("/api/jobs/") and path.endswith(("/resume", "/rerun"))
-        ):
+        if path == "/api/jobs" or (path.startswith("/api/jobs/") and path.endswith("/resume")):
             # Check ownership immediately before any provider-side action.
             self.owner.execute("SELECT 1")
             active = sum(
@@ -200,8 +198,6 @@ class HostedDashboard:
                     job = manager.stop(name)
                 elif action == "resume":
                     job = manager.resume(name, body)
-                elif action == "rerun":
-                    job = manager.rerun(name, body)
                 else:
                     raise JobError("Unknown action.", 404)
             return 200 if action == "stop" else 202, {"job": job}, {}
@@ -288,7 +284,7 @@ class HostedDashboard:
                 # checkpoint before ScanJobManager can launch a paid worker.
                 can_resume = bool(
                     row["payload"] is not None
-                    and row["job"]["status"] in {"stopped", "interrupted"}
+                    and row["job"]["status"] in {"failed", "stopped", "interrupted"}
                     and row["job"].get("runner") == "e2b"
                     and row["runner"].get("cleanup") == "paused"
                     and row["runner"].get("sandbox_id")
