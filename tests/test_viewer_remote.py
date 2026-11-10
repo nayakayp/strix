@@ -23,17 +23,28 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.parametrize(
-    "manifest,with_source",
+    "manifest,with_source,scan_code",
     [
-        ("ready", False),
-        ("outdated", False),
-        ("missing", False),
-        ("recover", False),
-        ("ready", True),
+        ("ready", False, 2),
+        ("outdated", False, 2),
+        ("missing", False, 2),
+        ("recover", False, 2),
+        ("ready", True, 2),
+        ("final_transfer_once", False, 0),
+        ("final_transfer_once", False, 2),
+        ("final_transfer_once", False, 1),
+        ("final_transfer_once", False, 130),
+        ("final_transfer_persistent", False, 2),
+        ("final_transfer_pause_failed", False, 2),
+        ("polling_transfer_recovered", False, 2),
     ],
 )
 def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # noqa: PLR0915 - prepared runner lifecycle
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest: str, with_source: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manifest: str,
+    with_source: bool,
+    scan_code: int,
 ) -> None:
     controller, vm_root = tmp_path / "controller", tmp_path / "vm"
     controller.mkdir()
@@ -61,6 +72,7 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
     for directory in (package, package.parent, package.parent.parent):
         (directory / "__init__.py").touch()
     shutil.copyfile(remote_snapshot.__file__, package / "remote_snapshot.py")
+    scan_status = {1: "failed", 130: "stopped"}.get(scan_code, "completed")
     # A synthetic scan engine isolates model billing, not preparation: the real
     # controller, process supervisor, filesystem permissions and result transfer run.
     (package / "job_runner.py").write_text(
@@ -71,12 +83,13 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
         " with zipfile.ZipFile(os.environ['NATSUHAT_DASHBOARD_SOURCE_PATH']) as z:\n"
         "  assert z.read('code/app.py') == b'SOURCE TRANSFER FIXTURE'\n"
         "with (directory/'launches').open('a') as log: log.write('launched\\n')\n"
-        "(directory/'run.json').write_text(json.dumps({'status':'completed',"
+        f"(directory/'run.json').write_text(json.dumps({{'status':{scan_status!r},"
         "'target':job['target']}))\n"
         "connection=json.loads(Path(os.environ['NATSUHAT_DASHBOARD_LLM_PATH']).read_text())\n"
         "assert connection['extra_headers']=={'X-Tenant':'private-routing-value'}\n"
         "assert connection['extra_body']=={'reasoning':{'enabled':False},'uncensored':True}\n"
-        "print('PREPARED_SCAN_EXECUTED private-routing-value private-test-key')\nsys.exit(2)\n"
+        "print('PREPARED_SCAN_EXECUTED private-routing-value private-test-key')\n"
+        f"sys.exit({scan_code})\n"
     )
     python = vm_root / "natsuhat/.venv/bin/python"
     python.parent.mkdir(parents=True)
@@ -96,6 +109,7 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
     class Sandbox:
         id = "prepared-vm"
         available = manifest != "recover"
+        downloads = 0
 
         def create(self) -> None:
             pass
@@ -107,6 +121,8 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
             pass
 
         def retain(self) -> str:
+            if manifest == "final_transfer_pause_failed":
+                raise ConnectionError("Synthetic pause outage")
             return "paused"
 
         def resume(self) -> bool:
@@ -116,6 +132,17 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
             (vm_root / path.removeprefix("/home/runner/")).write_bytes(data)
 
         def download(self, path: str) -> bytes:
+            self.downloads += 1
+            if manifest == "polling_transfer_recovered" and self.downloads <= 6:
+                raise ConnectionError("Synthetic polling outage")
+            # The synchronous scan first publishes its terminal record during
+            # polling. Fail the extra final transfer, leaving that old snapshot
+            # available even when every subsequent recovery attempt fails.
+            if manifest.startswith("final_transfer") and (
+                self.downloads == 2
+                or (manifest == "final_transfer_persistent" and self.downloads > 2)
+            ):
+                raise ConnectionError("Synthetic final result transfer outage")
             if not self.available:
                 raise ConnectionError("Synthetic result transfer outage")
             return (vm_root / path.removeprefix("/home/runner/")).read_bytes()
@@ -126,7 +153,7 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
                 if manifest == "missing":
                     raise FileNotFoundError("No prepared image manifest")
                 return json.dumps(
-                    {"revision": release_revision if manifest in {"ready", "recover"} else "old"}
+                    {"revision": "old" if manifest == "outdated" else release_revision}
                 )
             if "docker image inspect" in command:
                 return ""  # Only the provider and Docker daemon are substituted.
@@ -140,7 +167,7 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
     sandbox = Sandbox()
     monkeypatch.setattr(remote, "RemoteSandbox", lambda *_: sandbox)
     worker = remote.RemoteRun(controller)
-    if manifest not in {"ready", "recover"}:
+    if manifest in {"outdated", "missing"}:
         with pytest.raises(remote.JobError, match="No per-scan installation"):
             worker.execute()
         assert not (vm_root / "llm.json").exists()
@@ -157,10 +184,43 @@ def test_prepared_runner_scans_with_pinned_release_and_rejects_wrong_images(  # 
         sandbox.available = True
         assert remote.RemoteRun(controller).run(cleanup_only=True) == 130
         assert not json.loads((controller / "runner.json").read_text())["results_pending"]
+    elif manifest == "polling_transfer_recovered":
+        monkeypatch.setattr(remote.signal, "signal", lambda *_: None)
+        monkeypatch.setattr(worker.stop, "wait", lambda _: False)
+        assert worker.run() == 1
+        state = json.loads((controller / "runner.json").read_text())
+        assert not state["results_pending"] and state["sync_error"] is None
+        assert state["scan_exit_code"] is None
+        assert state["cleanup"] == "paused" and state["phase"] == "Failed"
+        assert "Remote execution failed during Scanning" in state["error"]
+    elif manifest.startswith("final_transfer"):
+        monkeypatch.setattr(remote.signal, "signal", lambda *_: None)
+        monkeypatch.setattr(remote.time, "sleep", lambda _: None)
+        failed = manifest in {"final_transfer_persistent", "final_transfer_pause_failed"}
+        assert worker.run() == (1 if failed else scan_code)
+        state = json.loads((controller / "runner.json").read_text())
+        assert state["scan_exit_code"] == scan_code
+        assert state["results_pending"] == (manifest == "final_transfer_persistent")
+        assert state["cleanup"] == (
+            "failed" if manifest == "final_transfer_pause_failed" else "paused"
+        )
+        assert state["phase"] == (
+            "Cleanup failed"
+            if manifest == "final_transfer_pause_failed"
+            else "Failed"
+            if failed or scan_code == 1
+            else "Stopped"
+            if scan_code == 130
+            else "Finished"
+        )
+        if failed:
+            assert state["error"]
+        else:
+            assert state["error"] is None and state["sync_error"] is None
     else:
         assert worker.execute() == 2
     assert json.loads((controller / "run.json").read_text()) == {
-        "status": "completed",
+        "status": scan_status,
         "target": "https://authorized.test",
     }
     assert (vm_root / f"natsuhat/natsuhat_runs/{job['id']}/launches").read_text() == "launched\n"

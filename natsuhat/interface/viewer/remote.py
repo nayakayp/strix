@@ -447,7 +447,7 @@ class RemoteRun:
                 "/home/runner/resume_job.py", Path(__file__).with_name("job_runner.py").read_bytes()
             )
             worker = ["/home/runner/resume_job.py", remote_dir, "--resume"]
-        self.save(results_pending=True, cleanup="pending", error=None)
+        self.save(results_pending=True, cleanup="pending", error=None, scan_exit_code=None)
         code = self.phase(
             "Resuming scan" if resume else "Scanning",
             [
@@ -461,9 +461,7 @@ class RemoteRun:
             ],
             results=True,
         )
-        self.save(phase="Receiving results")
-        self.sync()
-        self.save(results_pending=False, sync_error=None)
+        self.save(phase="Receiving results", scan_exit_code=code)
         return code
 
     def collect_results(self, *, restore: bool = False) -> None:
@@ -509,6 +507,12 @@ class RemoteRun:
                 time.sleep(2)
             else:
                 self.save(cleanup=retained, sandbox_id=self.sandbox.id)
+                if self.state.get("results_pending"):
+                    self.save(
+                        phase="Failed",
+                        error=self.state.get("error") or self.state.get("sync_error"),
+                    )
+                    return False
                 return True
         self.save(
             cleanup="failed",
@@ -524,6 +528,7 @@ class RemoteRun:
         signal.signal(signal.SIGTERM, self.cancel)
         signal.signal(signal.SIGINT, self.cancel)
         code = 130 if cleanup_only else 1
+        scan_exit_code: int | None = None
         self.save()
         try:
             if cleanup_only:
@@ -531,7 +536,11 @@ class RemoteRun:
                 if self.state.get("results_pending"):
                     self.collect_results(restore=True)
             else:
-                code = self.execute(resume=resume)
+                code = scan_exit_code = self.execute(resume=resume)
+                # Keep the confirmed scan exit even if final transfer needs the
+                # cleanup retries. Pending results still make the controller fail.
+                self.sync()
+                self.save(results_pending=False, sync_error=None)
         except InterruptedError:
             code = 130
         except Exception as exc:  # noqa: BLE001 - sanitize SDK errors and always stop the VM
@@ -544,9 +553,11 @@ class RemoteRun:
                     "Check the runner log and provider availability."
                 )
             )
-            code = 1
+            code = 1 if scan_exit_code is None else scan_exit_code
         finally:
             if self.cleanup():
+                if scan_exit_code is not None:
+                    self.save(error=None)
                 phase = {130: "Stopped", 1: "Failed"}.get(code, "Finished")
                 if cleanup_only:
                     if not self.state.get("results_pending"):
