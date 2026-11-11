@@ -286,6 +286,7 @@ export default function App() {
         }}
         canManageScans={canManageSettings}
         hosted={!!hosted}
+        footer={hosted?.accountMenu}
         mcpConnections={isRunView ? mcpConnections : []}
         mcpInUse={mcpInUse}
       />
@@ -394,7 +395,7 @@ export default function App() {
           onClose={closeFinding}
         />}
       </div>
-      <TrustToast message={hosted ? "Workspace records and private scan artifacts are stored in your configured Supabase project." : TRUST_BANNER} />
+      <TrustToast alignRight={!!hosted} message={hosted ? "Workspace records and private scan artifacts are stored in your configured Supabase project." : TRUST_BANNER} />
     </div>
   );
 }

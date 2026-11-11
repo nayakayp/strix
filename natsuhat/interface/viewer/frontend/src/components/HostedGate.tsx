@@ -1,5 +1,7 @@
 import { createContext, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { ChevronUp, LogOut, Users } from "lucide-react";
 import { setHostedWorkspace, workspaceHeaders } from "@/data/serverSource";
+import Sidebar from "@/components/Sidebar";
 
 type Workspace = { id: string; name: string; role: string };
 export type HostedSession = {
@@ -10,7 +12,7 @@ export type HostedSession = {
   aal?: string;
   workspaces?: Workspace[];
 };
-export const HostedContext = createContext<HostedSession | null>(null);
+export const HostedContext = createContext<(HostedSession & { accountMenu: ReactNode }) | null>(null);
 
 async function auth(action: string, body?: Record<string, unknown>) {
   const response = await fetch(`/api/auth/${action}`, body === undefined ? { cache: "no-store", headers: workspaceHeaders() } : {
@@ -53,6 +55,12 @@ export default function HostedGate({ children }: { children: ReactNode }) {
     return () => clearInterval(timer);
   }, [refresh]);
 
+  useEffect(() => {
+    const closeAccount = () => setAccount(false);
+    window.addEventListener("hashchange", closeAccount);
+    return () => window.removeEventListener("hashchange", closeAccount);
+  }, []);
+
   async function perform(action: () => Promise<void>) {
     setBusy(true); setError(null); setNotice(null);
     try { await action(); } catch (e) { setError(e instanceof Error ? e.message : "Account request failed."); }
@@ -90,20 +98,48 @@ export default function HostedGate({ children }: { children: ReactNode }) {
   </main>;
 
   const mfaRequired = ["owner", "admin"].includes(session.role ?? "") && session.aal !== "aal2";
-  return <HostedContext.Provider value={session}>
+  const accountMenu = <AccountMenu email={session.user.email} busy={busy} onAccount={() => setAccount(!account)} onSignOut={() => void perform(async () => { await auth("logout", {}); setAccount(false); await refresh(); })} />;
+  const showAccount = account || mfaRequired || !session.workspace;
+  return <HostedContext.Provider value={{ ...session, accountMenu }}>
     <div className="min-h-screen bg-black text-white">
-      <header className="flex flex-wrap items-center gap-3 border-b border-[#292929] px-4 py-3 text-xs sm:px-6">
+      <header className="sticky top-0 z-30 flex flex-wrap items-center gap-3 border-b border-[#292929] bg-black px-4 py-3 text-xs sm:px-6 lg:h-16">
         <label className="flex items-center gap-2 text-[#aaa]">Workspace<select aria-label="Active workspace" className="max-w-52 rounded border border-[#333] bg-black px-2 py-2 text-white" value={session.workspace ?? ""} onChange={event => void perform(async () => { await auth("workspace", { workspace: event.target.value }); window.location.hash = "page=pentest"; await refresh(); })}>
           {!session.workspaces?.length && <option value="">No workspace access</option>}{session.workspaces?.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
         </select></label>
-        <span className="text-[#888]">{session.role ?? "No membership"}</span><span className="ml-auto break-all text-[#aaa]">{session.user.email}</span>
-        <button className={button} aria-expanded={account || mfaRequired} onClick={() => setAccount(!account)}>Account &amp; team</button>
-        <button disabled={busy} className={button} onClick={() => void perform(async () => { await auth("logout", {}); setAccount(false); await refresh(); })}>Sign out</button>
+        <span className="text-[#888]">{session.role ?? "No membership"}</span>
+        <div className="ml-auto lg:hidden">{accountMenu}</div>
       </header>
       {error && <p role="alert" className="px-6 py-3 text-sm text-red-300">{error}</p>}
-      {(account || mfaRequired || !session.workspace) ? <AccountPanel key={session.user.id + session.workspace} session={session} refresh={refresh} mfaRequired={mfaRequired} /> : <div key={session.user.id + session.workspace + session.aal + session.role}>{children}</div>}
+      {showAccount ? <div className="flex">
+        <Sidebar view={null} onSelectView={view => { setAccount(false); window.location.hash = `page=${view}`; }} canManageScans={["owner", "admin"].includes(session.role ?? "") && session.aal === "aal2"} hosted footer={accountMenu} mcpConnections={[]} mcpInUse={new Set()} />
+        <div className="min-w-0 flex-1"><AccountPanel key={session.user.id + session.workspace} session={session} refresh={refresh} mfaRequired={mfaRequired} /></div>
+      </div> : <div key={session.user.id + session.workspace + session.aal + session.role}>{children}</div>}
     </div>
   </HostedContext.Provider>;
+}
+
+function AccountMenu({ email, busy, onAccount, onSignOut }: { email: string; busy: boolean; onAccount: () => void; onSignOut: () => void }) {
+  const details = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (!details.current?.contains(event.target as Node)) details.current?.removeAttribute("open");
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, []);
+  return <details ref={details} className="group relative" onKeyDown={event => {
+    if (event.key === "Escape") { details.current?.removeAttribute("open"); details.current?.querySelector("summary")?.focus(); }
+  }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) details.current?.removeAttribute("open"); }}>
+    <summary aria-label="Account menu" className="flex cursor-pointer list-none items-center gap-3 rounded-lg p-2 text-sm text-[#ccc] hover:bg-white/[0.06] focus-visible:outline-emerald-400 [&::-webkit-details-marker]:hidden">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 font-medium text-emerald-300" aria-hidden="true">{email.charAt(0).toUpperCase()}</span>
+      <span className="hidden flex-1 text-left lg:block">Account</span><ChevronUp className="hidden h-4 w-4 group-open:rotate-180 lg:block" aria-hidden="true" />
+    </summary>
+    <div className="absolute right-0 top-full z-50 mt-2 w-64 max-w-[calc(100vw-2rem)] rounded-xl border border-[#333] bg-[#111] p-1.5 shadow-2xl lg:bottom-full lg:left-0 lg:right-auto lg:top-auto lg:mb-2 lg:mt-0 lg:w-full lg:min-w-0">
+      <p className="break-all border-b border-[#292929] px-3 py-3 text-xs text-[#aaa]">{email}</p>
+      <button className="mt-1 flex w-full cursor-pointer items-center gap-2 rounded-md px-3 py-2.5 text-left text-sm text-[#ddd] hover:bg-white/[0.08] focus-visible:outline-emerald-400" onClick={() => { details.current?.removeAttribute("open"); onAccount(); }}><Users className="h-4 w-4 shrink-0" aria-hidden="true" />Account &amp; team</button>
+      <button disabled={busy} className="flex w-full cursor-pointer items-center gap-2 rounded-md px-3 py-2.5 text-left text-sm text-[#ddd] hover:bg-white/[0.08] focus-visible:outline-emerald-400 disabled:opacity-50" onClick={onSignOut}><LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />Sign out</button>
+    </div>
+  </details>;
 }
 
 type Factor = { id: string; status: string; factor_type: string; friendly_name?: string };

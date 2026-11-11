@@ -21,10 +21,11 @@ const WIDTH_KEY = "natsuhat_viewer_sidebar_width";
 const COLLAPSE_KEY = "natsuhat_viewer_sidebar_collapsed";
 
 interface SidebarProps {
-  view: View;
+  view: View | null;
   onSelectView: (view: View) => void;
   canManageScans: boolean;
   hosted?: boolean;
+  footer?: React.ReactNode;
   mcpConnections: McpConnectionStatus[];
   mcpInUse: Set<string>;
 }
@@ -44,6 +45,7 @@ export default function Sidebar({
   onSelectView,
   canManageScans,
   hosted = false,
+  footer,
   mcpConnections,
   mcpInUse,
 }: SidebarProps) {
@@ -132,7 +134,8 @@ export default function Sidebar({
 
       <aside
         className={cn(
-          "sticky top-0 z-20 hidden h-screen flex-shrink-0 flex-col overflow-hidden border-r border-[rgba(255,255,255,0.08)] bg-black lg:flex",
+          "sticky z-20 hidden flex-shrink-0 flex-col overflow-hidden border-r border-[rgba(255,255,255,0.08)] bg-black lg:flex",
+          hosted ? "top-16 h-[calc(100dvh-4rem)]" : "top-0 h-screen",
           !isResizing && "transition-[width] duration-200 ease-out"
         )}
         style={{ width: collapsed ? 0 : width }}
@@ -149,7 +152,7 @@ export default function Sidebar({
             <NavItem
               icon={<ProjectsIcon />}
               label="Pentest"
-              active={view !== "settings"}
+              active={view !== null && view !== "settings"}
               onClick={() => onSelectView("pentest")}
             />
             {canManageScans && (
@@ -166,6 +169,7 @@ export default function Sidebar({
           </div>
         </nav>
 
+        {footer && <div className="border-t border-white/10 p-2">{footer}</div>}
         <div className="px-4 py-4 text-xs text-[#666]">{hosted ? "Private workspace · Supabase" : "Local viewer · No account required"}</div>
 
         {/* Resize handle */}

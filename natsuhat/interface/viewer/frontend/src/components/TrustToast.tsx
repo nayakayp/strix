@@ -7,7 +7,7 @@ const DISMISS_KEY = "natsuhat_viewer_trust_dismissed";
  * One-time privacy notice, shown as a toast pinned over the sidebar. Dismissing
  * it persists to localStorage so it never returns on reload or view changes.
  */
-export function TrustToast({ message }: { message: string }) {
+export function TrustToast({ message, alignRight = false }: { message: string; alignRight?: boolean }) {
   const [dismissed, setDismissed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(DISMISS_KEY) === "1";
@@ -29,7 +29,7 @@ export function TrustToast({ message }: { message: string }) {
 
   return (
     <div
-      className="fixed bottom-3 left-3 z-[60] max-w-xs rounded-lg bg-[#0a0a0a] p-3 shadow-2xl"
+      className={`fixed bottom-3 ${alignRight ? "right-3" : "left-3"} z-[60] max-w-xs rounded-lg bg-[#0a0a0a] p-3 shadow-2xl`}
       style={{ border: "1px solid #2a2a2a" }}
       role="status"
     >
